@@ -218,20 +218,32 @@ class Indexer {
             $limit = (int) get_option('cleversay_ai_max_chunks', self::MAX_CHUNKS);
         }
 
-        // ── Phase 3 (v4.40.0): hybrid retrieval dispatch ─────────────────────
-        // When the per-network `use_hybrid_retrieval` flag is on, delegate
-        // to the Retriever (vector + FULLTEXT, RRF-merged). The contact-info
-        // appendix still runs on hybrid results so contact details land in
-        // the AI context regardless of which retrieval method picked them.
-        // When the flag is off, fall through to the original FULLTEXT path
-        // below — byte-identical to pre-Phase-3 behavior.
+        // ── Phase 3 hybrid retrieval dispatch ───────────────────────────────
+        // When the per-network `use_hybrid_retrieval` flag is on, ask the
+        // Retriever (vector + FULLTEXT, RRF-merged) first. If it returns
+        // results, run them through the contact-info appendix and return.
+        //
+        // When the Retriever returns empty (distance gate fired, or vector
+        // path failed and FULLTEXT also came up empty), v4.40.5 falls
+        // through to the legacy FULLTEXT path below instead of returning
+        // empty. Reason: a low vector similarity (gate fire) means "vector
+        // isn't confident" but doesn't mean "no useful chunk exists."
+        // FULLTEXT plus the same-source contact-chunk heuristic frequently
+        // surfaces a usable answer in those cases. Pre-v4.40.5 the dispatch
+        // returned empty here, which suppressed otherwise-correct FULLTEXT
+        // answers (e.g. "do you offer discount for seniors" → senior audit
+        // page). Failing through is strictly better: worst case = pre-
+        // Phase-3 behavior; best case = hybrid wins. The Retriever's gate
+        // is still useful — it filters out *misleading* high-vector picks
+        // before they reach FULLTEXT — but it should not block FULLTEXT
+        // from running.
         $supabase_cfg = \CleverSay\Supabase::get_config();
         if (!empty($supabase_cfg['use_hybrid_retrieval'])) {
             $results = \CleverSay\Retriever::instance()->retrieve($question, $limit);
-            if (empty($results)) {
-                return [];
+            if (!empty($results)) {
+                return $this->append_contact_chunks($results);
             }
-            return $this->append_contact_chunks($results);
+            // Fall through to FULLTEXT path below.
         }
 
         $question_clean = sanitize_text_field($question);

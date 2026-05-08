@@ -3,7 +3,7 @@
  * Plugin Name: CleverSay Knowledge Base
  * Plugin URI: https://cleversay.com
  * Description: A modern, AI-powered knowledge base and FAQ chatbot system for WordPress.
- * Version: 4.40.4
+ * Version: 4.40.5
  * Author: CleverSay Team
  * Author URI: https://cleversay.com
  * License: GPL v2 or later
@@ -38,11 +38,11 @@ if (!function_exists('str_ends_with')) {
 }
 
 // Define plugin constants
-defined('CLEVERSAY_VERSION')        || define('CLEVERSAY_VERSION', '4.40.4');
+defined('CLEVERSAY_VERSION')        || define('CLEVERSAY_VERSION', '4.40.5');
 defined('CLEVERSAY_PLUGIN_DIR')     || define('CLEVERSAY_PLUGIN_DIR', plugin_dir_path(__FILE__));
 defined('CLEVERSAY_PLUGIN_URL')     || define('CLEVERSAY_PLUGIN_URL', plugin_dir_url(__FILE__));
 defined('CLEVERSAY_PLUGIN_BASENAME')|| define('CLEVERSAY_PLUGIN_BASENAME', plugin_basename(__FILE__));
-defined('CLEVERSAY_DB_VERSION')     || define('CLEVERSAY_DB_VERSION', '4.40.4');
+defined('CLEVERSAY_DB_VERSION')     || define('CLEVERSAY_DB_VERSION', '4.40.5');
 
 /**
  * Activation hook - creates database tables
