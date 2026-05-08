@@ -1,0 +1,1245 @@
+/**
+ * CleverSay Admin — Flat Design System
+ * Bold, graphic, poster-inspired. Zero shadows, thick borders, solid color blocks.
+ *
+ * @package CleverSay
+ */
+
+/* ============================================================
+   Design Tokens — Flat Design
+   ============================================================ */
+:root {
+    /* Colors — vibrant, confident, high contrast */
+    --cs-bg:             #FFFFFF;
+    --cs-fg:             #111827;
+    --cs-muted:          #F3F4F6;
+    --cs-muted-2:        #E5E7EB;
+    --cs-border:         #E5E7EB;
+    --cs-border-strong:  #111827;
+
+    /* Text hierarchy */
+    --cs-text:           #111827;
+    --cs-text-secondary: #374151;
+    --cs-text-tertiary:  #6B7280;
+    --cs-text-muted:     #9CA3AF;
+
+    /* Brand palette */
+    --cs-primary:         #3B82F6;
+    --cs-primary-hover:   #2563EB;
+    --cs-primary-light:   #DBEAFE;
+
+    --cs-secondary:       #10B981;
+    --cs-secondary-hover: #059669;
+    --cs-secondary-light: #D1FAE5;
+
+    --cs-accent:          #F59E0B;
+    --cs-accent-hover:    #D97706;
+    --cs-accent-light:    #FEF3C7;
+
+    --cs-danger:          #EF4444;
+    --cs-danger-hover:    #DC2626;
+    --cs-danger-light:    #FEE2E2;
+
+    /* Extended palette — for visual variety in stat cards, icons, decoration */
+    --cs-violet:          #8B5CF6;  /* Violet 500 */
+    --cs-violet-hover:    #7C3AED;  /* Violet 600 */
+    --cs-violet-light:    #EDE9FE;  /* Violet 100 */
+
+    --cs-pink:            #EC4899;  /* Pink 500 */
+    --cs-pink-hover:      #DB2777;  /* Pink 600 */
+    --cs-pink-light:      #FCE7F3;  /* Pink 100 */
+
+    --cs-cyan:            #06B6D4;  /* Cyan 500 */
+    --cs-cyan-hover:      #0891B2;  /* Cyan 600 */
+    --cs-cyan-light:      #CFFAFE;  /* Cyan 100 */
+
+    --cs-success:         var(--cs-secondary);
+    --cs-success-light:   var(--cs-secondary-light);
+    --cs-warning:         var(--cs-accent);
+    --cs-warning-light:   var(--cs-accent-light);
+
+    /* Legacy compat aliases */
+    --cs-surface:         var(--cs-bg);
+    --cs-surface-2:       var(--cs-muted);
+    --cs-surface-3:       var(--cs-muted);
+    --cs-text-primary:    var(--cs-text);
+    --cs-text-light:      var(--cs-text-tertiary);
+    --cs-text-quaternary: var(--cs-text-muted);
+    --cs-fill-1:          var(--cs-muted);
+    --cs-fill-2:          var(--cs-muted);
+    --cs-separator:       var(--cs-border);
+    --cs-border-strong-compat: var(--cs-border-strong);
+    --cs-accent-muted:    var(--cs-primary-light);
+
+    /* NO SHADOWS */
+    --cs-shadow-xs: none;
+    --cs-shadow-sm: none;
+    --cs-shadow-md: none;
+    --cs-shadow-lg: none;
+    --cs-shadow:    none;
+
+    /* Shape — moderate radius */
+    --cs-radius-xs:  4px;
+    --cs-radius-sm:  6px;
+    --cs-radius:     8px;
+    --cs-radius-md:  8px;
+    --cs-radius-lg:  8px;
+    --cs-radius-xl:  12px;
+
+    /* Motion */
+    --cs-ease:      cubic-bezier(0.4, 0, 0.2, 1);
+    --cs-ease-out:  cubic-bezier(0.16, 1, 0.3, 1);
+    --cs-transition: 200ms var(--cs-ease);
+    --cs-transition-fast: 140ms var(--cs-ease);
+}
+
+/* ============================================================
+   Scaffold & Typography
+   ============================================================ */
+.cleversay-admin,
+.cleversay-admin-wrap,
+.wrap.cleversay-admin {
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--cs-text);
+    letter-spacing: -0.01em;
+}
+
+.cleversay-admin h1,
+.cleversay-admin h2,
+.cleversay-admin h3,
+.cleversay-admin h4,
+.wrap.cleversay-admin h1,
+.wrap.cleversay-admin h2,
+.wrap.cleversay-admin h3,
+.wrap.cleversay-admin h4 {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--cs-text);
+    line-height: 1.2;
+}
+
+.cleversay-admin h1,
+.wrap.cleversay-admin h1 {
+    font-size: 28px;
+    font-weight: 800;
+    margin: 0 0 16px;
+}
+
+/* WordPress inline H1 pattern — H1 on left, button pushed to the right.
+   When a page uses <h1 class="wp-heading-inline"> followed by
+   <a class="page-title-action">, they sit on the same line with the
+   button pushed to the right edge. */
+.wrap.cleversay-admin h1.wp-heading-inline {
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 12px;
+    margin-bottom: 0;
+}
+
+.wrap.cleversay-admin h1.wp-heading-inline + .page-title-action {
+    float: right;
+    display: inline-flex;
+    vertical-align: middle;
+    align-items: center;
+    gap: 6px;
+    margin-left: 0;
+    margin-top: 4px;
+}
+
+/* wp-header-end sits between the inline heading and the rest of the page
+   — this invisible element also clears the float and provides spacing */
+.wrap.cleversay-admin .wp-header-end {
+    display: block;
+    clear: both;
+    height: 0;
+    margin: 16px 0 0;
+    visibility: hidden;
+}
+
+.cleversay-admin h2,
+.wrap.cleversay-admin h2 {
+    font-size: 22px;
+    margin: 24px 0 12px;
+}
+
+.cleversay-admin h3,
+.wrap.cleversay-admin h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 20px 0 12px;
+}
+
+.cleversay-admin p,
+.wrap.cleversay-admin p {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--cs-text-secondary);
+}
+
+.cleversay-admin p.description,
+.wrap.cleversay-admin p.description {
+    color: var(--cs-text-tertiary);
+    font-size: 13px;
+}
+
+/* ============================================================
+   Header
+   ============================================================ */
+.cleversay-admin-header {
+    background: var(--cs-bg);
+    padding: 24px 0 16px;
+    margin-bottom: 24px;
+    border-bottom: 2px solid var(--cs-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    position: relative;
+}
+
+.cleversay-admin-header h1 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+}
+
+.cleversay-admin-header .dashicons {
+    color: var(--cs-primary);
+    width: 28px;
+    height: 28px;
+    font-size: 28px;
+}
+
+.cleversay-admin-header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* ============================================================
+   Buttons — Bold, flat
+   ============================================================ */
+.cleversay-admin .button,
+.cleversay-admin .cleversay-btn,
+.wrap.cleversay-admin .button,
+.wrap.cleversay-admin .cleversay-btn {
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    letter-spacing: 0.01em !important;
+    border-radius: var(--cs-radius-sm) !important;
+    padding: 8px 16px !important;
+    height: auto !important;
+    line-height: 1.4 !important;
+    border: 2px solid transparent !important;
+    background: var(--cs-muted) !important;
+    color: var(--cs-text) !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    cursor: pointer;
+    transition: all var(--cs-transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cleversay-admin .button:hover,
+.cleversay-admin .cleversay-btn:hover,
+.wrap.cleversay-admin .button:hover,
+.wrap.cleversay-admin .cleversay-btn:hover {
+    background: var(--cs-muted-2) !important;
+    transform: translateY(-1px);
+    box-shadow: none !important;
+}
+
+.cleversay-admin .button:focus,
+.cleversay-admin .cleversay-btn:focus,
+.wrap.cleversay-admin .button:focus,
+.wrap.cleversay-admin .cleversay-btn:focus {
+    box-shadow: 0 0 0 3px var(--cs-primary-light) !important;
+    outline: none !important;
+}
+
+.cleversay-admin .button-primary,
+.cleversay-admin .cleversay-btn-primary,
+.wrap.cleversay-admin .button-primary,
+.wrap.cleversay-admin .cleversay-btn-primary {
+    background: var(--cs-primary) !important;
+    color: #fff !important;
+    border-color: var(--cs-primary) !important;
+}
+
+.cleversay-admin .button-primary:hover,
+.cleversay-admin .cleversay-btn-primary:hover,
+.wrap.cleversay-admin .button-primary:hover,
+.wrap.cleversay-admin .cleversay-btn-primary:hover {
+    background: var(--cs-primary-hover) !important;
+    border-color: var(--cs-primary-hover) !important;
+    color: #fff !important;
+}
+
+.cleversay-admin .cleversay-btn-danger,
+.wrap.cleversay-admin .cleversay-btn-danger {
+    background: var(--cs-danger) !important;
+    color: #fff !important;
+    border-color: var(--cs-danger) !important;
+}
+
+.cleversay-admin .cleversay-btn-danger:hover,
+.wrap.cleversay-admin .cleversay-btn-danger:hover {
+    background: var(--cs-danger-hover) !important;
+    border-color: var(--cs-danger-hover) !important;
+}
+
+.cleversay-admin .cleversay-btn-success,
+.wrap.cleversay-admin .cleversay-btn-success {
+    background: var(--cs-success) !important;
+    color: #fff !important;
+    border-color: var(--cs-success) !important;
+}
+
+.cleversay-admin .cleversay-btn-success:hover,
+.wrap.cleversay-admin .cleversay-btn-success:hover {
+    background: var(--cs-secondary-hover) !important;
+    border-color: var(--cs-secondary-hover) !important;
+}
+
+.cleversay-admin .cleversay-btn-secondary,
+.wrap.cleversay-admin .cleversay-btn-secondary {
+    background: transparent !important;
+    color: var(--cs-text) !important;
+    border: 2px solid var(--cs-text) !important;
+}
+
+.cleversay-admin .cleversay-btn-secondary:hover,
+.wrap.cleversay-admin .cleversay-btn-secondary:hover {
+    background: var(--cs-text) !important;
+    color: var(--cs-bg) !important;
+}
+
+.cleversay-admin .button-small,
+.cleversay-admin .cleversay-btn-small,
+.wrap.cleversay-admin .button-small,
+.wrap.cleversay-admin .cleversay-btn-small {
+    padding: 4px 10px !important;
+    font-size: 12px !important;
+}
+
+.cleversay-admin .page-title-action,
+.wrap.cleversay-admin .page-title-action {
+    background: var(--cs-primary) !important;
+    color: #fff !important;
+    border: 2px solid var(--cs-primary) !important;
+    border-radius: var(--cs-radius-sm) !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 600 !important;
+    padding: 8px 16px !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    transition: all var(--cs-transition-fast);
+}
+
+.cleversay-admin .page-title-action:hover,
+.wrap.cleversay-admin .page-title-action:hover {
+    background: var(--cs-primary-hover) !important;
+    border-color: var(--cs-primary-hover) !important;
+    color: #fff !important;
+    transform: translateY(-1px);
+}
+
+/* ============================================================
+   Stat Cards — Rotating color variants for visual interest
+   ============================================================ */
+.cleversay-stats-row,
+.cleversay-stat-cards {
+    clear: both;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.cleversay-stat-card,
+.stat-card {
+    background: var(--cs-muted);
+    border-radius: var(--cs-radius);
+    padding: 24px;
+    border: none;
+    border-left: 4px solid var(--cs-primary);
+    box-shadow: none;
+    transition: all var(--cs-transition);
+    position: relative;
+    overflow: hidden;
+}
+
+.cleversay-stat-card:hover,
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: none;
+}
+
+/* Color rotation — each card picks a brand color by position.
+   This creates the "poster" vibe the user wanted without being chaotic. */
+.cleversay-stat-card:nth-child(7n+1),
+.stat-card:nth-child(7n+1) {
+    background: var(--cs-primary-light);
+    border-left-color: var(--cs-primary);
+}
+.cleversay-stat-card:nth-child(7n+1) .stat-value,
+.stat-card:nth-child(7n+1) .stat-value,
+.cleversay-stat-card:nth-child(7n+1) .stat-number,
+.stat-card:nth-child(7n+1) .stat-number {
+    color: var(--cs-primary);
+}
+.cleversay-stat-card:nth-child(7n+1) .stat-icon,
+.stat-card:nth-child(7n+1) .stat-icon {
+    background: var(--cs-primary);
+}
+
+.cleversay-stat-card:nth-child(7n+2),
+.stat-card:nth-child(7n+2) {
+    background: var(--cs-secondary-light);
+    border-left-color: var(--cs-secondary);
+}
+.cleversay-stat-card:nth-child(7n+2) .stat-value,
+.stat-card:nth-child(7n+2) .stat-value,
+.cleversay-stat-card:nth-child(7n+2) .stat-number,
+.stat-card:nth-child(7n+2) .stat-number {
+    color: var(--cs-secondary-hover);
+}
+.cleversay-stat-card:nth-child(7n+2) .stat-icon,
+.stat-card:nth-child(7n+2) .stat-icon {
+    background: var(--cs-secondary);
+}
+
+.cleversay-stat-card:nth-child(7n+3),
+.stat-card:nth-child(7n+3) {
+    background: var(--cs-accent-light);
+    border-left-color: var(--cs-accent);
+}
+.cleversay-stat-card:nth-child(7n+3) .stat-value,
+.stat-card:nth-child(7n+3) .stat-value,
+.cleversay-stat-card:nth-child(7n+3) .stat-number,
+.stat-card:nth-child(7n+3) .stat-number {
+    color: var(--cs-accent-hover);
+}
+.cleversay-stat-card:nth-child(7n+3) .stat-icon,
+.stat-card:nth-child(7n+3) .stat-icon {
+    background: var(--cs-accent);
+}
+
+.cleversay-stat-card:nth-child(7n+4),
+.stat-card:nth-child(7n+4) {
+    background: var(--cs-violet-light);
+    border-left-color: var(--cs-violet);
+}
+.cleversay-stat-card:nth-child(7n+4) .stat-value,
+.stat-card:nth-child(7n+4) .stat-value,
+.cleversay-stat-card:nth-child(7n+4) .stat-number,
+.stat-card:nth-child(7n+4) .stat-number {
+    color: var(--cs-violet);
+}
+.cleversay-stat-card:nth-child(7n+4) .stat-icon,
+.stat-card:nth-child(7n+4) .stat-icon {
+    background: var(--cs-violet);
+}
+
+.cleversay-stat-card:nth-child(7n+5),
+.stat-card:nth-child(7n+5) {
+    background: var(--cs-pink-light);
+    border-left-color: var(--cs-pink);
+}
+.cleversay-stat-card:nth-child(7n+5) .stat-value,
+.stat-card:nth-child(7n+5) .stat-value,
+.cleversay-stat-card:nth-child(7n+5) .stat-number,
+.stat-card:nth-child(7n+5) .stat-number {
+    color: var(--cs-pink);
+}
+.cleversay-stat-card:nth-child(7n+5) .stat-icon,
+.stat-card:nth-child(7n+5) .stat-icon {
+    background: var(--cs-pink);
+}
+
+.cleversay-stat-card:nth-child(7n+6),
+.stat-card:nth-child(7n+6) {
+    background: var(--cs-cyan-light);
+    border-left-color: var(--cs-cyan);
+}
+.cleversay-stat-card:nth-child(7n+6) .stat-value,
+.stat-card:nth-child(7n+6) .stat-value,
+.cleversay-stat-card:nth-child(7n+6) .stat-number,
+.stat-card:nth-child(7n+6) .stat-number {
+    color: var(--cs-cyan-hover);
+}
+.cleversay-stat-card:nth-child(7n+6) .stat-icon,
+.stat-card:nth-child(7n+6) .stat-icon {
+    background: var(--cs-cyan);
+}
+
+.cleversay-stat-card:nth-child(7n+7),
+.stat-card:nth-child(7n+7) {
+    background: var(--cs-danger-light);
+    border-left-color: var(--cs-danger);
+}
+.cleversay-stat-card:nth-child(7n+7) .stat-value,
+.stat-card:nth-child(7n+7) .stat-value,
+.cleversay-stat-card:nth-child(7n+7) .stat-number,
+.stat-card:nth-child(7n+7) .stat-number {
+    color: var(--cs-danger);
+}
+.cleversay-stat-card:nth-child(7n+7) .stat-icon,
+.stat-card:nth-child(7n+7) .stat-icon {
+    background: var(--cs-danger);
+}
+
+.stat-value,
+.stat-number {
+    font-family: 'Outfit', sans-serif;
+    font-size: 36px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    display: block;
+    margin-bottom: 6px;
+}
+
+.stat-label {
+    font-family: 'Outfit', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--cs-text-secondary);
+    display: block;
+}
+
+.stat-card .stat-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--cs-radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 12px;
+    color: #fff !important;
+}
+
+.stat-card .stat-icon .cs-icon,
+.stat-card .stat-icon .dashicons {
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    font-size: 24px;
+}
+
+/* ============================================================
+   Cards & Panels
+   ============================================================ */
+.cleversay-panel,
+.cleversay-card,
+.cleversay-table-card {
+    clear: both;
+    background: var(--cs-bg);
+    border-radius: var(--cs-radius);
+    border: 2px solid var(--cs-border);
+    box-shadow: none !important;
+    padding: 0;
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+
+.cleversay-panel {
+    padding: 24px;
+}
+
+.cleversay-table-card {
+    padding: 0 1em 1em;
+}
+
+.cleversay-table-card > div:first-child {
+    background: var(--cs-muted);
+    border-bottom: 2px solid var(--cs-border);
+    padding: 14px 18px !important;
+}
+
+.category-card {
+    background: var(--cs-muted);
+    border-radius: var(--cs-radius);
+    padding: 24px;
+    border: none;
+    box-shadow: none;
+    transition: all var(--cs-transition);
+    cursor: pointer;
+}
+
+.category-card:hover {
+    background: var(--cs-muted-2);
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: none;
+}
+
+/* ============================================================
+   Tables
+   ============================================================ */
+.cleversay-admin .wp-list-table,
+.cleversay-admin table.widefat,
+.wrap.cleversay-admin .wp-list-table,
+.wrap.cleversay-admin table.widefat {
+    border: 2px solid var(--cs-border) !important;
+    border-radius: var(--cs-radius) !important;
+    background: var(--cs-bg) !important;
+    box-shadow: none !important;
+    overflow: hidden;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.cleversay-admin .wp-list-table thead th,
+.cleversay-admin table.widefat thead th,
+.wrap.cleversay-admin .wp-list-table thead th,
+.wrap.cleversay-admin table.widefat thead th {
+    background: var(--cs-muted) !important;
+    color: var(--cs-text) !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 700 !important;
+    font-size: 11px !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 14px 16px !important;
+    border-bottom: 2px solid var(--cs-border) !important;
+    border-top: none !important;
+}
+
+.cleversay-admin .wp-list-table tbody tr,
+.cleversay-admin table.widefat tbody tr,
+.wrap.cleversay-admin .wp-list-table tbody tr,
+.wrap.cleversay-admin table.widefat tbody tr {
+    transition: background var(--cs-transition-fast);
+}
+
+.cleversay-admin .wp-list-table tbody tr:hover,
+.cleversay-admin table.widefat tbody tr:hover,
+.wrap.cleversay-admin .wp-list-table tbody tr:hover,
+.wrap.cleversay-admin table.widefat tbody tr:hover {
+    background: var(--cs-muted) !important;
+}
+
+.cleversay-admin .wp-list-table tbody td,
+.cleversay-admin table.widefat tbody td,
+.wrap.cleversay-admin .wp-list-table tbody td,
+.wrap.cleversay-admin table.widefat tbody td {
+    padding: 14px 16px !important;
+    border-bottom: 1px solid var(--cs-border) !important;
+    color: var(--cs-text);
+    font-size: 13px;
+}
+
+.cleversay-admin .wp-list-table tbody tr:last-child td,
+.cleversay-admin table.widefat tbody tr:last-child td {
+    border-bottom: none !important;
+}
+
+/* Actions column — right-aligned cell with button spacing */
+.cleversay-admin .column-actions,
+.wrap.cleversay-admin .column-actions {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.cleversay-admin td.column-actions,
+.wrap.cleversay-admin td.column-actions {
+    white-space: normal;
+}
+
+.cleversay-admin td.column-actions .button,
+.wrap.cleversay-admin td.column-actions .button,
+.cleversay-admin td.column-actions .cleversay-btn,
+.wrap.cleversay-admin td.column-actions .cleversay-btn {
+    margin-left: 4px;
+    margin-bottom: 4px;
+}
+
+.cleversay-admin td.column-actions .button:first-child,
+.wrap.cleversay-admin td.column-actions .button:first-child {
+    margin-left: 0;
+}
+
+.cleversay-admin .widefat.striped tbody tr.alternate,
+.cleversay-admin .widefat.striped tbody tr:nth-child(odd) {
+    background: transparent !important;
+}
+
+/* ============================================================
+   Tablenav — filters/pagination rows above and below tables
+   ============================================================ */
+.cleversay-admin .tablenav,
+.wrap.cleversay-admin .tablenav {
+    clear: both;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 0;
+    margin: 16px 0;
+    height: auto;
+    background: transparent;
+}
+
+.cleversay-admin .tablenav::before,
+.cleversay-admin .tablenav::after,
+.wrap.cleversay-admin .tablenav::before,
+.wrap.cleversay-admin .tablenav::after {
+    display: none !important;
+    content: none !important;
+}
+
+.cleversay-admin .tablenav .alignleft,
+.cleversay-admin .tablenav .alignright,
+.wrap.cleversay-admin .tablenav .alignleft,
+.wrap.cleversay-admin .tablenav .alignright {
+    float: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cleversay-admin .tablenav-pages,
+.wrap.cleversay-admin .tablenav-pages {
+    float: none;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* ============================================================
+   Badges
+   ============================================================ */
+.cleversay-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-family: 'Outfit', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    line-height: 1.4;
+    border: none;
+    box-shadow: none;
+}
+
+.cleversay-badge-active {
+    background: var(--cs-secondary);
+    color: #fff;
+}
+
+.cleversay-badge-hold {
+    background: var(--cs-accent);
+    color: #fff;
+}
+
+.cleversay-badge-inactive,
+.cleversay-badge-expired {
+    background: var(--cs-danger);
+    color: #fff;
+}
+
+/* ============================================================
+   Forms
+   ============================================================ */
+.cleversay-admin input[type="text"],
+.cleversay-admin input[type="email"],
+.cleversay-admin input[type="url"],
+.cleversay-admin input[type="number"],
+.cleversay-admin input[type="password"],
+.cleversay-admin input[type="search"],
+.cleversay-admin textarea,
+.cleversay-admin select,
+.wrap.cleversay-admin input[type="text"],
+.wrap.cleversay-admin input[type="email"],
+.wrap.cleversay-admin input[type="url"],
+.wrap.cleversay-admin input[type="number"],
+.wrap.cleversay-admin input[type="password"],
+.wrap.cleversay-admin input[type="search"],
+.wrap.cleversay-admin textarea,
+.wrap.cleversay-admin select {
+    background-color: var(--cs-muted) !important;
+    border: 2px solid transparent !important;
+    border-radius: var(--cs-radius-sm) !important;
+    padding: 10px 12px !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-size: 14px !important;
+    color: var(--cs-text) !important;
+    box-shadow: none !important;
+    transition: all var(--cs-transition-fast);
+    line-height: 1.4;
+}
+
+.cleversay-admin input[type="text"]:focus,
+.cleversay-admin input[type="email"]:focus,
+.cleversay-admin input[type="url"]:focus,
+.cleversay-admin input[type="number"]:focus,
+.cleversay-admin input[type="password"]:focus,
+.cleversay-admin input[type="search"]:focus,
+.cleversay-admin textarea:focus,
+.cleversay-admin select:focus,
+.wrap.cleversay-admin input[type="text"]:focus,
+.wrap.cleversay-admin input[type="email"]:focus,
+.wrap.cleversay-admin input[type="url"]:focus,
+.wrap.cleversay-admin input[type="number"]:focus,
+.wrap.cleversay-admin input[type="password"]:focus,
+.wrap.cleversay-admin input[type="search"]:focus,
+.wrap.cleversay-admin textarea:focus,
+.wrap.cleversay-admin select:focus {
+    background: var(--cs-bg) !important;
+    border-color: var(--cs-primary) !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+.cleversay-admin input[type="checkbox"],
+.wrap.cleversay-admin input[type="checkbox"] {
+    border-radius: var(--cs-radius-xs);
+    border-width: 2px;
+}
+
+/* Select dropdowns — custom chevron via a wrapping element approach.
+   The chevron is positioned absolutely by a pseudo-element on the parent,
+   so no amount of background overrides on the <select> itself can erase it.
+   We draw the chevron via a radial/linear gradient built into the select's
+   own background using multiple layers — specifically a chevron SVG as
+   a data URI that sits ATOP any background-color the user sets. */
+.cleversay-admin select,
+.wrap.cleversay-admin select,
+.cleversay-admin select:focus,
+.wrap.cleversay-admin select:focus,
+.cleversay-admin select:hover,
+.wrap.cleversay-admin select:hover,
+.cleversay-admin select:active,
+.wrap.cleversay-admin select:active {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    padding-right: 36px !important;
+    cursor: pointer;
+}
+
+/* Wrap the select in a flex container automatically via a sibling pseudo.
+   Because <select> is a replaced element and can't have ::after children
+   that render on top of its content, we overlay the chevron using the
+   standard background-image approach but bound it to a layer that survives
+   even if the user overrides `background` shorthand — we do this by using
+   a *second* declaration that wins via source order and repeats the image
+   settings, AND we also set `background-color` via CSS variable so users
+   can change color without wiping the image. */
+.cleversay-admin select,
+.wrap.cleversay-admin select {
+    background-color: var(--cs-select-bg, var(--cs-muted)) !important;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23374151' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    background-size: 16px 16px !important;
+}
+
+/* Chevron turns blue when the select is focused */
+.cleversay-admin select:focus,
+.wrap.cleversay-admin select:focus {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    background-size: 16px 16px !important;
+}
+
+/* Small selects used in filters / tablenav */
+.cleversay-admin select.small-text,
+.wrap.cleversay-admin select.small-text {
+    padding-right: 28px !important;
+    background-position: right 6px center !important;
+    background-size: 12px 12px !important;
+}
+
+.cleversay-admin .form-table th,
+.wrap.cleversay-admin .form-table th {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 600;
+    color: var(--cs-text);
+    font-size: 14px;
+    padding: 16px 10px 16px 0;
+}
+
+.cleversay-admin .form-table td,
+.wrap.cleversay-admin .form-table td {
+    padding: 14px 10px;
+}
+
+/* ============================================================
+   Tabs
+   ============================================================ */
+.cleversay-admin .nav-tab-wrapper,
+.wrap.cleversay-admin .nav-tab-wrapper {
+    border-bottom: 2px solid var(--cs-border) !important;
+    padding: 0 !important;
+    margin: 0 0 24px 0 !important;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.cleversay-admin .nav-tab,
+.wrap.cleversay-admin .nav-tab {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    color: var(--cs-text-tertiary) !important;
+    padding: 12px 18px !important;
+    margin: 0 !important;
+    text-decoration: none !important;
+    box-shadow: none !important;
+    transition: all var(--cs-transition-fast);
+    border-bottom: 3px solid transparent !important;
+    position: relative;
+    top: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cleversay-admin .nav-tab:hover,
+.wrap.cleversay-admin .nav-tab:hover {
+    color: var(--cs-text) !important;
+    background: var(--cs-muted) !important;
+}
+
+.cleversay-admin .nav-tab-active,
+.cleversay-admin .nav-tab-active:focus,
+.wrap.cleversay-admin .nav-tab-active,
+.wrap.cleversay-admin .nav-tab-active:focus {
+    color: var(--cs-primary) !important;
+    border-bottom: 3px solid var(--cs-primary) !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.cleversay-admin .tab-content,
+.wrap.cleversay-admin .tab-content {
+    display: none;
+    animation: cs-fadein 200ms var(--cs-ease-out);
+}
+
+.cleversay-admin .tab-content.active,
+.wrap.cleversay-admin .tab-content.active {
+    display: block;
+}
+
+@keyframes cs-fadein {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   Notices
+   ============================================================ */
+.cleversay-admin .notice,
+.wrap.cleversay-admin .notice {
+    border: none !important;
+    border-left: 4px solid !important;
+    border-radius: var(--cs-radius-sm) !important;
+    padding: 12px 16px !important;
+    margin: 16px 0 !important;
+    box-shadow: none !important;
+    font-family: 'Outfit', sans-serif;
+}
+
+.cleversay-admin .notice.notice-success,
+.wrap.cleversay-admin .notice.notice-success {
+    background: var(--cs-secondary-light) !important;
+    border-left-color: var(--cs-secondary) !important;
+    color: #065F46;
+}
+
+.cleversay-admin .notice.notice-warning,
+.wrap.cleversay-admin .notice.notice-warning {
+    background: var(--cs-accent-light) !important;
+    border-left-color: var(--cs-accent) !important;
+    color: #92400E;
+}
+
+.cleversay-admin .notice.notice-error,
+.wrap.cleversay-admin .notice.notice-error {
+    background: var(--cs-danger-light) !important;
+    border-left-color: var(--cs-danger) !important;
+    color: #991B1B;
+}
+
+.cleversay-admin .notice.notice-info,
+.wrap.cleversay-admin .notice.notice-info {
+    background: var(--cs-primary-light) !important;
+    border-left-color: var(--cs-primary) !important;
+    color: #1E40AF;
+}
+
+/* ============================================================
+   Modals
+   ============================================================ */
+.cleversay-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(17, 24, 39, 0.5);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.cleversay-modal-content {
+    background: var(--cs-bg);
+    border-radius: var(--cs-radius);
+    border: 2px solid var(--cs-border);
+    max-width: 600px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: none;
+}
+
+.cleversay-modal-header {
+    padding: 20px 24px;
+    border-bottom: 2px solid var(--cs-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--cs-muted);
+}
+
+.cleversay-modal-header h3 {
+    margin: 0 !important;
+    font-size: 18px !important;
+}
+
+.cleversay-modal-footer {
+    padding: 16px 24px;
+    border-top: 2px solid var(--cs-border);
+    background: var(--cs-muted);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.cleversay-modal-close {
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    font-size: 24px;
+    color: var(--cs-text-tertiary);
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--cs-radius-sm);
+    transition: all var(--cs-transition-fast);
+}
+
+.cleversay-modal-close:hover {
+    background: var(--cs-muted-2);
+    color: var(--cs-text);
+}
+
+/* ============================================================
+   Grids
+   ============================================================ */
+.category-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+}
+
+.cleversay-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+.cleversay-detail-item {
+    padding: 14px 16px;
+    background: var(--cs-muted);
+    border-radius: var(--cs-radius-sm);
+}
+
+.cleversay-detail-value {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--cs-text);
+    display: block;
+    margin-top: 4px;
+}
+
+/* ============================================================
+   Charts
+   ============================================================ */
+.cleversay-charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin: 20px 0;
+}
+
+.cleversay-chart-card {
+    background: var(--cs-bg);
+    border: 2px solid var(--cs-border);
+    border-radius: var(--cs-radius);
+    padding: 20px;
+    box-shadow: none;
+    min-height: 320px;
+}
+
+@media (max-width: 960px) {
+    .cleversay-charts-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ============================================================
+   WP overrides inside our admin
+   ============================================================ */
+.cleversay-admin .subsubsub,
+.wrap.cleversay-admin .subsubsub {
+    font-family: 'Outfit', sans-serif;
+    margin: 16px 0;
+}
+
+.cleversay-admin .wp-color-result,
+.wrap.cleversay-admin .wp-color-result {
+    border: 2px solid var(--cs-border) !important;
+    border-radius: var(--cs-radius-sm) !important;
+    box-shadow: none !important;
+    font-family: 'Outfit', sans-serif;
+    height: 36px;
+}
+
+/* ============================================================
+   Misc
+   ============================================================ */
+.cleversay-admin code,
+.wrap.cleversay-admin code {
+    background: var(--cs-muted);
+    border: 1px solid var(--cs-border);
+    border-radius: var(--cs-radius-xs);
+    padding: 2px 6px;
+    font-size: 12px;
+    font-family: 'SF Mono', Consolas, Monaco, monospace;
+    color: var(--cs-text);
+}
+
+.cleversay-admin hr,
+.wrap.cleversay-admin hr {
+    border: none;
+    border-top: 2px solid var(--cs-border);
+    margin: 24px 0;
+}
+
+.cleversay-admin h3 .dashicons,
+.wrap.cleversay-admin h3 .dashicons {
+    color: var(--cs-primary);
+    vertical-align: middle;
+    margin-right: 4px;
+}
+
+/* ============================================================
+   Lucide Icons (cs-icon)
+   ────────────────────────────────────────────────────────────
+   Inline SVG icons rendered by \CleverSay\Icons::render().
+   Stroke is currentColor — set color via CSS on parent.
+   ============================================================ */
+.cs-icon {
+    display: inline-block;
+    vertical-align: -0.125em;
+    flex-shrink: 0;
+    color: currentColor;
+    transition: transform var(--cs-transition-fast), color var(--cs-transition-fast);
+}
+
+/* When inside headings, tint with primary by default — but H3 icons
+   rotate through the palette for visual interest */
+.cleversay-admin h1 .cs-icon,
+.cleversay-admin h2 .cs-icon,
+.wrap.cleversay-admin h1 .cs-icon,
+.wrap.cleversay-admin h2 .cs-icon {
+    color: var(--cs-primary);
+    margin-right: 6px;
+}
+
+/* H3 section headings — rotate color through palette based on position.
+   Gives each section a subtle distinct identity without being chaotic. */
+.cleversay-admin h3 .cs-icon,
+.wrap.cleversay-admin h3 .cs-icon {
+    color: var(--cs-primary);
+    margin-right: 6px;
+}
+.cleversay-admin h3:nth-of-type(6n+2) .cs-icon,
+.wrap.cleversay-admin h3:nth-of-type(6n+2) .cs-icon {
+    color: var(--cs-secondary);
+}
+.cleversay-admin h3:nth-of-type(6n+3) .cs-icon,
+.wrap.cleversay-admin h3:nth-of-type(6n+3) .cs-icon {
+    color: var(--cs-violet);
+}
+.cleversay-admin h3:nth-of-type(6n+4) .cs-icon,
+.wrap.cleversay-admin h3:nth-of-type(6n+4) .cs-icon {
+    color: var(--cs-accent);
+}
+.cleversay-admin h3:nth-of-type(6n+5) .cs-icon,
+.wrap.cleversay-admin h3:nth-of-type(6n+5) .cs-icon {
+    color: var(--cs-pink);
+}
+.cleversay-admin h3:nth-of-type(6n+6) .cs-icon,
+.wrap.cleversay-admin h3:nth-of-type(6n+6) .cs-icon {
+    color: var(--cs-cyan);
+}
+
+/* When inside buttons, inherit button text color */
+.cleversay-admin .button .cs-icon,
+.cleversay-admin .cleversay-btn .cs-icon,
+.wrap.cleversay-admin .button .cs-icon,
+.wrap.cleversay-admin .cleversay-btn .cs-icon {
+    color: inherit;
+    margin-right: 2px;
+}
+
+/* Stat card icons — white on solid primary circle */
+.stat-card .stat-icon .cs-icon,
+.cleversay-stat-card .stat-icon .cs-icon {
+    color: #fff;
+}
+
+/* Notices — icon matches notice color */
+.cleversay-admin .notice .cs-icon,
+.wrap.cleversay-admin .notice .cs-icon {
+    margin-right: 6px;
+}
+
+/* ============================================================
+   Custom Overrides
+   ────────────────────────────────────────────────────────────
+   Add your custom CSS below. These rules will load AFTER all
+   the core styles, so you can override anything without using
+   !important. Use this space for per-install tweaks or brand
+   customizations that should survive plugin updates.
+
+   Examples:
+     .cleversay-admin h1 { color: #ff0000; }
+     .cleversay-stat-card { background: #fffbeb; }
+     .cleversay-badge-active { background: #8b5cf6; }
+   ============================================================ */

@@ -1,0 +1,1740 @@
+/**
+ * CleverSay Public Styles
+ * Modern, minimal design for chatbot and FAQ components
+ */
+
+:root {
+    --cleversay-primary:          #0073aa;
+    --cleversay-primary-hover:    #005a87;
+    --cleversay-header-bg:        #0073aa;
+    --cleversay-header-text:      #ffffff;
+    --cleversay-chat-bg:          #f5f5f7;
+    --cleversay-user-bubble-bg:   #0073aa;
+    --cleversay-user-bubble-text: #ffffff;
+    --cleversay-bot-bubble-bg:    #ffffff;
+    --cleversay-bot-bubble-text:  #1e1e1e;
+    --cleversay-toggle-bg:        #0073aa;
+    --cleversay-bg:               #ffffff;
+    --cleversay-bg-secondary:     #f8f9fa;
+    --cleversay-text:             #1e1e1e;
+    --cleversay-text-light:       #6c757d;
+    --cleversay-border:           #e2e8f0;
+    --cleversay-shadow:           0 4px 20px rgba(0, 0, 0, 0.1);
+    --cleversay-shadow-hover:     0 8px 30px rgba(0, 0, 0, 0.15);
+    --cleversay-radius:           12px;
+    --cleversay-radius-sm:        8px;
+    --cleversay-transition:       all 0.3s ease;
+}
+
+/* ==========================================================================
+   Chatbot Widget
+   ========================================================================== */
+
+.cleversay-widget {
+    position: fixed;
+    z-index: 99999;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+}
+/* Protect SVG icons inside the widget from external CSS resets */
+.cleversay-widget svg,
+.cleversay-container svg {
+    display: inline-block !important;
+    vertical-align: middle;
+    flex-shrink: 0;
+    overflow: visible;
+}
+
+
+
+.cleversay-widget.position-bottom-right {
+    bottom: 20px;
+    right: 20px;
+}
+
+.cleversay-widget.position-bottom-left {
+    bottom: 20px;
+    left: 20px;
+}
+
+.cleversay-widget.position-top-right {
+    top: 20px;
+    right: 20px;
+}
+
+.cleversay-widget.position-top-left {
+    top: 20px;
+    left: 20px;
+}
+
+/* Widget Toggle Button */
+.cleversay-toggle {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: var(--cleversay-primary);
+    border: none;
+    cursor: pointer;
+    box-shadow: var(--cleversay-shadow);
+    transition: var(--cleversay-transition);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cleversay-toggle:hover {
+    transform: scale(1.1);
+    box-shadow: var(--cleversay-shadow-hover);
+}
+
+.cleversay-toggle svg {
+    width: 28px;
+    height: 28px;
+    fill: white;
+}
+
+.cleversay-toggle .close-icon {
+    display: none;
+}
+
+.cleversay-widget.active .cleversay-toggle .chat-icon {
+    display: none;
+}
+
+.cleversay-widget.active .cleversay-toggle .close-icon {
+    display: block;
+}
+
+/* Widget Container */
+.cleversay-container {
+    position: absolute;
+    bottom: 80px;
+    right: 0;
+    width: 425px;
+    max-width: calc(100vw - 40px);
+    background: var(--cleversay-bg);
+    border-radius: var(--cleversay-radius);
+    box-shadow: var(--cleversay-shadow-hover);
+    overflow: hidden;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(20px);
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-widget.active .cleversay-container {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.cleversay-widget.position-bottom-left .cleversay-container {
+    right: auto;
+    left: 0;
+}
+
+.cleversay-widget.position-top-right .cleversay-container,
+.cleversay-widget.position-top-left .cleversay-container {
+    bottom: auto;
+    top: 80px;
+}
+
+/* Widget Header */
+.cleversay-header {
+    background: var(--cleversay-header-bg, var(--cleversay-primary));
+    color: white;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.cleversay-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.cleversay-close {
+    background: none;
+    border: none;
+    color: white;
+    cursor: pointer;
+    padding: 5px;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.cleversay-close:hover {
+    opacity: 1;
+}
+
+/* Chat Messages */
+.cleversay-messages {
+    padding: 20px;
+    max-height: 350px;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+}
+
+.cleversay-message {
+    margin-bottom: 16px;
+    animation: messageSlideIn 0.3s ease;
+}
+
+/* removed — see mascot design section */
+
+@keyframes messageSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* removed — see mascot design section */
+
+/* removed — see mascot design section */
+
+/* removed — see mascot design section */
+
+.cleversay-bubble {
+    display: block;
+    padding: 12px 16px;
+    border-radius: var(--cleversay-radius-sm);
+    word-wrap: break-word;
+}
+
+.cleversay-bubble p {
+    margin: 0 0 8px;
+}
+
+.cleversay-bubble p:last-child {
+    margin-bottom: 0;
+}
+
+.cleversay-bubble a {
+    color: inherit;
+    text-decoration: underline;
+}
+
+.cleversay-bubble a:hover {
+    text-decoration: none;
+}
+
+/* Loading Animation */
+.cleversay-loading {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: var(--cleversay-radius-sm);
+    width: fit-content;
+}
+
+.cleversay-loading span {
+    width: 8px;
+    height: 8px;
+    background: var(--cleversay-text-light);
+    border-radius: 50%;
+    animation: loadingBounce 1.4s infinite ease-in-out;
+}
+
+.cleversay-loading span:nth-child(1) { animation-delay: -0.32s; }
+.cleversay-loading span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes loadingBounce {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+}
+
+/* Rating */
+.cleversay-rating {
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: var(--cleversay-radius-sm);
+    max-width: calc(100% - 40px);
+}
+
+.cleversay-rating-label {
+    font-size: 13px;
+    color: var(--cleversay-text-light);
+    margin-bottom: 8px;
+}
+
+.cleversay-rating-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.cleversay-rating-btn {
+    padding: 6px 16px;
+    border: 1px solid var(--cleversay-border);
+    border-radius: 20px;
+    background: white;
+    cursor: pointer;
+    font-size: 15px;
+    transition: var(--cleversay-transition);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.cleversay-rating-btn:hover {
+    background: var(--cleversay-bg-secondary);
+}
+
+.cleversay-rating-btn.selected {
+    background: var(--cleversay-primary);
+    color: white;
+    border-color: var(--cleversay-primary);
+}
+
+.cleversay-rating-thanks {
+    color: var(--cleversay-text-light);
+    font-size: 15px;
+}
+
+/* Suggestions */
+.cleversay-suggestions {
+    margin-top: 12px;
+}
+
+.cleversay-suggestions-label {
+    font-size: 13px;
+    color: var(--cleversay-text-light);
+    margin-bottom: 8px;
+}
+
+.cleversay-suggestion {
+    display: block;
+    padding: 8px 12px;
+    background: white;
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius-sm);
+    margin-bottom: 6px;
+    cursor: pointer;
+    font-size: 15px;
+    transition: var(--cleversay-transition);
+    text-align: left;
+    width: 100%;
+}
+
+.cleversay-suggestion:hover {
+    background: var(--cleversay-bg-secondary);
+    border-color: var(--cleversay-primary);
+}
+
+/* Yes/No prompt — used after thumbs-down to ask "Still need help?" */
+.cleversay-yesno {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.cleversay-yesno-btn {
+    flex: 0 1 auto;
+    padding: 6px 14px;
+    background: white;
+    border: 1px solid var(--cleversay-border);
+    border-radius: 16px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--cleversay-primary);
+    transition: var(--cleversay-transition);
+    line-height: 1.3;
+}
+.cleversay-yesno-btn:hover {
+    background: var(--cleversay-primary);
+    color: var(--cleversay-bg);
+    border-color: var(--cleversay-primary);
+}
+.cleversay-yesno-yes {
+    font-weight: 600;
+}
+
+/* Related Questions */
+.cleversay-related-questions {
+    display: block;
+    width: 100%;
+    max-width: calc(100% - 40px);
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: var(--cleversay-radius-sm);
+    box-sizing: border-box;
+}
+
+.cleversay-related-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cleversay-text-light);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cleversay-related-label svg {
+    opacity: 0.7;
+}
+
+.cleversay-related-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.cleversay-related-list li {
+    margin-bottom: 6px;
+}
+
+.cleversay-related-list li:last-child {
+    margin-bottom: 0;
+}
+
+.cleversay-related-item {
+    display: block;
+    padding: 10px 14px;
+    background: var(--cleversay-bg);
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius-sm);
+    color: var(--cleversay-text);
+    text-decoration: none;
+    font-size: 15px;
+    line-height: 1.4;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-related-item:hover {
+    background: white;
+    border-color: var(--cleversay-primary);
+    color: var(--cleversay-primary);
+}
+
+.cleversay-related-item::before {
+    content: '→';
+    margin-right: 8px;
+    opacity: 0.5;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-related-item:hover::before {
+    opacity: 1;
+    color: var(--cleversay-primary);
+}
+
+/* Input Area */
+.cleversay-input-area {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--cleversay-border);
+    background: var(--cleversay-bg);
+    min-height: 58px;
+}
+
+/* Support both with and without a wrapper div */
+.cleversay-input-wrapper {
+    display: flex;
+    flex: 1;
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+}
+
+.cleversay-input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 16px;
+    border: 1px solid var(--cleversay-border);
+    border-radius: 24px;
+    font-size: 16px;
+    line-height: 1.4;
+    outline: none;
+    background: var(--cleversay-bg);
+    color: var(--cleversay-text);
+    transition: border-color 0.2s, box-shadow 0.2s;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.cleversay-input:focus {
+    border-color: var(--cleversay-primary);
+    box-shadow: 0 0 0 3px rgba(0, 115, 170, 0.1);
+}
+
+.cleversay-input::placeholder {
+    color: #aaa;
+}
+
+.cleversay-submit {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--cleversay-toggle-bg, var(--cleversay-primary));
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s;
+}
+
+.cleversay-submit:hover {
+    opacity: 0.85;
+}
+
+.cleversay-submit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.cleversay-submit svg {
+    width: 18px;
+    height: 18px;
+    fill: white;
+}
+
+/* Inquiry Form */
+.cleversay-inquiry {
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: var(--cleversay-radius-sm);
+}
+
+.cleversay-inquiry h4 {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.cleversay-inquiry input,
+.cleversay-inquiry textarea {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius-sm);
+    margin-bottom: 10px;
+    font-size: 16px;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+.cleversay-inquiry textarea {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.cleversay-inquiry textarea:focus,
+.cleversay-inquiry input:focus {
+    outline: none;
+    border-color: var(--cleversay-primary);
+    box-shadow: 0 0 0 2px rgba(var(--cleversay-primary-rgb, 59, 130, 246), 0.1);
+}
+
+.cleversay-inquiry button {
+    width: 100%;
+    padding: 12px;
+    background: var(--cleversay-primary);
+    color: white;
+    border: none;
+    border-radius: var(--cleversay-radius-sm);
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 500;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-inquiry button:hover {
+    background: var(--cleversay-primary-hover);
+}
+
+/* ==========================================================================
+   Search Form (Shortcode)
+   ========================================================================== */
+
+.cleversay-search-form {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.cleversay-search-form h3 {
+    margin: 0 0 16px;
+    font-size: 24px;
+    font-weight: 600;
+}
+
+.cleversay-search-wrapper {
+    display: flex;
+    gap: 12px;
+}
+
+.cleversay-search-wrapper input {
+    flex: 1;
+    padding: 14px 20px;
+    border: 2px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius);
+    font-size: 16px;
+    outline: none;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-search-wrapper input:focus {
+    border-color: var(--cleversay-primary);
+}
+
+.cleversay-search-wrapper button {
+    padding: 14px 28px;
+    background: var(--cleversay-primary);
+    color: white;
+    border: none;
+    border-radius: var(--cleversay-radius);
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-search-wrapper button:hover {
+    background: var(--cleversay-primary-hover);
+}
+
+.cleversay-results {
+    margin-top: 24px;
+}
+
+.cleversay-result-item {
+    padding: 20px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: var(--cleversay-radius);
+    margin-bottom: 16px;
+}
+
+.cleversay-result-question {
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--cleversay-secondary);
+}
+
+.cleversay-result-answer {
+    color: var(--cleversay-text);
+}
+
+/* ==========================================================================
+   FAQ List (Shortcode)
+   ========================================================================== */
+
+.cleversay-faq {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.cleversay-faq-item {
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+}
+
+.cleversay-faq-question {
+    padding: 16px 20px;
+    background: var(--cleversay-bg);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 500;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-faq-question:hover {
+    background: var(--cleversay-bg-secondary);
+}
+
+.cleversay-faq-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--cleversay-bg-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-faq-item.active .cleversay-faq-icon {
+    transform: rotate(45deg);
+    background: var(--cleversay-primary);
+    color: white;
+}
+
+.cleversay-faq-answer {
+    padding: 0 20px;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease, padding 0.3s ease;
+}
+
+.cleversay-faq-item.active .cleversay-faq-answer {
+    padding: 20px;
+    max-height: 1000px;
+    border-top: 1px solid var(--cleversay-border);
+}
+
+/* ==========================================================================
+   Embedded Chatbot (Shortcode)
+   ========================================================================== */
+
+.cleversay-embedded {
+    background: var(--cleversay-bg);
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius);
+    overflow: hidden;
+}
+
+.cleversay-embedded .cleversay-messages {
+    min-height: 300px;
+    max-height: 500px;
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
+@media (max-width: 480px) {
+    .cleversay-container {
+        width: 100%;
+        max-width: none;
+        border-radius: var(--cleversay-radius) var(--cleversay-radius) 0 0;
+        bottom: 70px;
+        right: 0;
+        left: 0;
+    }
+    
+    .cleversay-widget.position-bottom-left .cleversay-container {
+        left: 0;
+    }
+    
+    .cleversay-toggle {
+        width: 50px;
+        height: 50px;
+    }
+    
+    .cleversay-search-wrapper {
+        flex-direction: column;
+    }
+}
+
+/* ==========================================================================
+   Embedded Chatbot (Shortcode)
+   ========================================================================== */
+
+.cleversay-embedded {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    max-width: 600px;
+    margin: 20px auto;
+}
+
+.cleversay-embedded-container {
+    background: var(--cleversay-bg);
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius);
+    box-shadow: var(--cleversay-shadow);
+    overflow: hidden;
+}
+
+.cleversay-embedded .cleversay-header {
+    background: var(--cleversay-primary);
+    color: white;
+    padding: 15px 20px;
+}
+
+.cleversay-embedded .cleversay-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.cleversay-embedded .cleversay-messages {
+    height: 350px;
+    overflow-y: auto;
+    padding: 20px;
+    background: var(--cleversay-bg-secondary);
+}
+
+.cleversay-embedded .cleversay-message {
+    margin-bottom: 15px;
+    display: flex;
+}
+
+.cleversay-embedded .cleversay-message.bot {
+    justify-content: flex-start;
+}
+
+.cleversay-embedded .cleversay-message.user {
+    justify-content: flex-end;
+}
+
+.cleversay-embedded .cleversay-bubble {
+    padding: 12px 16px;
+    border-radius: var(--cleversay-radius);
+    line-height: 1.5;
+}
+
+.cleversay-embedded .cleversay-message.bot .cleversay-bubble {
+    background: var(--cleversay-bg);
+    color: var(--cleversay-text);
+    border: 1px solid var(--cleversay-border);
+    border-bottom-left-radius: 4px;
+}
+
+.cleversay-embedded .cleversay-message.user .cleversay-bubble {
+    background: var(--cleversay-primary);
+    color: white;
+    border-bottom-right-radius: 4px;
+}
+
+.cleversay-embedded .cleversay-input-area {
+    padding: 15px 20px;
+    background: var(--cleversay-bg);
+    border-top: 1px solid var(--cleversay-border);
+}
+
+.cleversay-embedded .cleversay-input-wrapper {
+    display: flex;
+    gap: 10px;
+}
+
+.cleversay-embedded .cleversay-input {
+    flex: 1;
+    padding: 12px 16px;
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius-sm);
+    font-size: 16px;
+    outline: none;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-embedded .cleversay-input:focus {
+    border-color: var(--cleversay-primary);
+    box-shadow: 0 0 0 3px rgba(0, 115, 170, 0.1);
+}
+
+.cleversay-embedded .cleversay-submit {
+    width: 44px;
+    height: 44px;
+    background: var(--cleversay-primary);
+    color: white;
+    border: none;
+    border-radius: var(--cleversay-radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-embedded .cleversay-submit:hover {
+    background: var(--cleversay-primary-hover);
+}
+
+.cleversay-embedded .cleversay-submit svg {
+    width: 20px;
+    height: 20px;
+}
+
+/* Responsive for embedded */
+@media (max-width: 480px) {
+    .cleversay-embedded {
+        margin: 10px;
+        max-width: none;
+    }
+    
+    .cleversay-embedded .cleversay-messages {
+        height: 280px;
+    }
+}
+
+/* ==========================================================================
+   Two-Column Layout with Top Questions
+   ========================================================================== */
+
+.cleversay-embedded-wrapper {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+    max-width: 1000px;
+    margin: 20px auto;
+}
+
+.cleversay-embedded-wrapper.cleversay-single-column {
+    max-width: 600px;
+}
+
+.cleversay-embedded-wrapper.cleversay-two-column {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.cleversay-embedded-wrapper.cleversay-two-column .cleversay-embedded {
+    flex: 1;
+    max-width: none;
+    margin: 0;
+}
+
+.cleversay-embedded-wrapper.cleversay-single-column .cleversay-embedded {
+    max-width: none;
+    margin: 0;
+}
+
+/* Top Questions Panel */
+.cleversay-top-questions {
+    width: 320px;
+    flex-shrink: 0;
+}
+
+.cleversay-top-questions-container {
+    background: var(--cleversay-bg);
+    border: 1px solid var(--cleversay-border);
+    border-radius: var(--cleversay-radius);
+    box-shadow: var(--cleversay-shadow);
+    overflow: hidden;
+}
+
+.cleversay-top-questions-header {
+    background: var(--cleversay-header-bg, var(--cleversay-primary, #2271b1));
+    color: var(--cleversay-header-text, #ffffff);
+    padding: 15px 20px;
+}
+
+.cleversay-top-questions-header h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--cleversay-header-text, #ffffff);
+}
+
+.cleversay-top-questions-header .dashicons {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    color: var(--cleversay-header-text, #ffffff);
+    opacity: 0.85;
+}
+
+.cleversay-top-questions-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.cleversay-top-questions-list li {
+    border-bottom: 1px solid var(--cleversay-border);
+}
+
+.cleversay-top-questions-list li:last-child {
+    border-bottom: none;
+}
+
+.cleversay-top-question {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    text-decoration: none;
+    color: var(--cleversay-text);
+    transition: var(--cleversay-transition);
+}
+
+.cleversay-top-question:hover {
+    background: var(--cleversay-bg-secondary);
+    color: var(--cleversay-primary);
+}
+
+.cleversay-question-number {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    background: var(--cleversay-bg-secondary);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cleversay-text-light);
+}
+
+.cleversay-top-question:hover .cleversay-question-number {
+    background: var(--cleversay-primary);
+    color: white;
+}
+
+.cleversay-question-text {
+    flex: 1;
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+.cleversay-question-hits {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--cleversay-text-light);
+    background: var(--cleversay-bg-secondary);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+/* Responsive for two-column layout */
+@media (max-width: 768px) {
+    .cleversay-embedded-wrapper.cleversay-two-column {
+        flex-direction: column;
+    }
+    
+    .cleversay-top-questions {
+        width: 100%;
+        order: -1;
+    }
+    
+    .cleversay-top-questions-list {
+        max-height: 200px;
+    }
+}
+
+@media (max-width: 480px) {
+    .cleversay-embedded-wrapper {
+        margin: 10px;
+    }
+    
+    .cleversay-embedded-wrapper.cleversay-two-column {
+        gap: 15px;
+    }
+    
+    .cleversay-top-question {
+        padding: 12px 14px;
+    }
+    
+    .cleversay-question-text {
+        font-size: 13px;
+    }
+}
+
+/* ==========================================================================
+   Print Styles
+   ========================================================================== */
+
+@media print {
+    .cleversay-widget {
+        display: none !important;
+    }
+}
+
+/* ==========================================================================
+   Accessibility helpers
+   ========================================================================== */
+
+.screen-reader-text {
+    border: 0;
+    clip: rect(1px, 1px, 1px, 1px);
+    clip-path: inset(50%);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    width: 1px;
+    word-wrap: normal !important;
+}
+
+/* Visible focus rings — WCAG 2.1 AA */
+.cleversay-toggle:focus-visible,
+.cleversay-close:focus-visible,
+.cleversay-submit:focus-visible,
+.cleversay-input:focus-visible,
+.cleversay-rating-btn:focus-visible,
+.cleversay-suggestion:focus-visible,
+.cleversay-related-item:focus-visible {
+    outline: 3px solid #005fcc;
+    outline-offset: 2px;
+}
+
+/* Rating button pressed state */
+.cleversay-rating-btn[aria-pressed="true"] {
+    background: var(--cleversay-primary);
+    color: #fff;
+}
+
+/* Hidden error live region — accessible but invisible */
+#cleversay-error-live {
+    border: 0;
+    clip: rect(1px, 1px, 1px, 1px);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    width: 1px;
+}
+
+/* ==========================================================================
+   AI-assisted answer badge
+   ========================================================================== */
+
+.cleversay-ai-badge-wrap {
+    display: block;
+    margin-top: 6px;
+}
+
+.cleversay-ai-badge {
+    display: inline;
+    padding: 2px 7px;
+    background: #f0f4ff;
+    border: 1px solid #dde4fb;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #6b7fc4;
+    font-weight: 500;
+}
+
+/* ==========================================================================
+   Mascot / Avatar Chat Design (v2.3.0)
+   ========================================================================== */
+
+/* ── Toggle button ── */
+.cleversay-toggle {
+    overflow: hidden;
+    padding: 0;
+    position: relative;
+    background: var(--cleversay-toggle-bg, var(--cleversay-primary)) !important;
+}
+
+/* Avatar fills button completely — no background bleed */
+.cleversay-toggle-avatar {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    display: block;
+}
+
+/* When open: hide chat icon and avatar, show close icon centred */
+.cleversay-widget.active .cleversay-toggle .chat-icon,
+.cleversay-widget.active .cleversay-toggle-avatar {
+    display: none !important;
+}
+
+.cleversay-widget.active .cleversay-toggle .close-icon {
+    display: flex !important;
+    width: 26px;
+    height: 26px;
+    fill: white;
+    position: relative;
+    z-index: 1;
+}
+
+/* ── Header ── */
+.cleversay-header {
+    background: var(--cleversay-primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-radius: var(--cleversay-radius) var(--cleversay-radius) 0 0;
+}
+
+.cleversay-header-avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 2px solid rgba(255,255,255,0.4);
+}
+
+.cleversay-header-title {
+    flex: 1;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--cleversay-header-text, #fff);
+}
+
+.cleversay-close {
+    background: none;
+    border: none;
+    color: var(--cleversay-header-text, #fff);
+    opacity: .85;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.cleversay-close:hover {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+}
+
+/* ── Message list ── */
+.cleversay-messages {
+    background: var(--cleversay-chat-bg, #f5f5f7);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+/* ── Bot message row ── */
+.cleversay-message.bot {
+    display: flex;
+    flex-direction: row !important;
+    align-items: flex-start;
+    gap: 10px;
+    justify-content: flex-start;
+}
+
+.cleversay-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.cleversay-msg-avatar-placeholder {
+    background: var(--cleversay-header-bg, var(--cleversay-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+}
+
+.cleversay-msg-avatar-placeholder svg {
+    fill: #fff;
+    width: 18px;
+    height: 18px;
+}
+
+.cleversay-msg-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.cleversay-msg-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--cleversay-text-light);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 2px;
+}
+
+/* Bot bubble */
+.cleversay-message.bot .cleversay-bubble {
+    background: var(--cleversay-bot-bubble-bg, #fff);
+    color: var(--cleversay-bot-bubble-text, var(--cleversay-text));
+    border-radius: 0 14px 14px 14px;
+    padding: 10px 14px;
+    font-size: 16px;
+    line-height: 1.55;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    word-break: break-word;
+}
+
+/* ── User message row ── */
+.cleversay-message.user {
+    display: flex;
+    flex-direction: row !important;
+    justify-content: flex-end;
+    align-items: flex-end;
+}
+
+.cleversay-message.user .cleversay-bubble {
+    background: var(--cleversay-user-bubble-bg, var(--cleversay-primary));
+    color: var(--cleversay-user-bubble-text, #fff);
+    border-radius: 14px 14px 0 14px;
+    padding: 10px 16px;
+    font-size: 16px;
+    line-height: 1.55;
+    max-width: 92%;
+    word-break: break-word;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+
+/* input rules consolidated into main section above */
+
+/* ── Loading dots ── */
+/* Stand-alone use (no bubble wrapper) */
+.cleversay-loading {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    padding: 4px 2px;
+    width: fit-content;
+}
+
+/* Inside a bubble (mascot design) */
+.cleversay-bubble-loading {
+    padding: 12px 16px;
+    line-height: 1;
+}
+
+.cleversay-bubble-loading .cleversay-loading {
+    padding: 0;
+}
+
+.cleversay-loading span {
+    width: 7px;
+    height: 7px;
+    background: #bbb;
+    border-radius: 50%;
+    display: inline-block;
+    animation: cs-bounce 1.2s infinite ease-in-out;
+}
+
+.cleversay-loading span:nth-child(2) { animation-delay: 0.2s; }
+.cleversay-loading span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes cs-bounce {
+    0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
+    40%           { transform: scale(1);   opacity: 1; }
+}
+
+/* ── Container sizing (mascot design overrides) ── */
+/* Width and max-height only — visibility handled by the original rule above */
+.cleversay-container {
+    width: 425px;
+    max-width: calc(100vw - 30px);
+    max-height: 540px;
+    background: var(--cleversay-chat-bg, #f5f5f7);
+    display: flex;
+    flex-direction: column;
+}
+
+.cleversay-widget.active .cleversay-container {
+    display: flex;
+}
+
+.cleversay-messages {
+    flex: 1;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    min-height: 0;
+}
+
+/* Related questions & suggestions */
+.cleversay-related-questions,
+.cleversay-suggestions {
+    margin-top: 8px;
+}
+
+.cleversay-related-list {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+}
+
+.cleversay-related-item,
+.cleversay-suggestion {
+    display: inline-block;
+    margin: 3px 3px 0 0;
+    padding: 4px 10px;
+    font-size: 13px;
+    background: #f0f0f0;
+    border: 1px solid #ddd;
+    border-radius: 20px;
+    cursor: pointer;
+    color: var(--cleversay-primary);
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.cleversay-related-item:hover,
+.cleversay-suggestion:hover {
+    background: var(--cleversay-primary);
+    color: #fff;
+    border-color: var(--cleversay-primary);
+}
+
+/* Rating */
+.cleversay-rating {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.cleversay-rating-label {
+    font-size: 13px;
+    color: var(--cleversay-text-light);
+}
+
+.cleversay-rating-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.cleversay-rating-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    font-size: 13px;
+    border: 1px solid #ddd;
+    border-radius: 20px;
+    background: #fff;
+    cursor: pointer;
+    color: var(--cleversay-text-light);
+    transition: all 0.15s;
+}
+
+.cleversay-rating-btn:hover,
+.cleversay-rating-btn.selected,
+.cleversay-rating-btn[aria-pressed="true"] {
+    background: var(--cleversay-primary);
+    color: #fff;
+    border-color: var(--cleversay-primary);
+}
+
+.cleversay-rating-thanks {
+    font-size: 13px;
+    color: var(--cleversay-text-light);
+    margin-top: 6px;
+}
+
+/* Inquiry */
+.cleversay-inquiry {
+    margin-top: 10px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.cleversay-inquiry h4 {
+    margin: 0 0 8px;
+    font-size: 15px;
+}
+
+.cleversay-inquiry-form textarea,
+.cleversay-inquiry-form input[type="email"] {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 15px;
+    margin-bottom: 6px;
+    box-sizing: border-box;
+}
+
+.cleversay-inquiry-form button {
+    padding: 6px 14px;
+    background: var(--cleversay-primary);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+}
+
+.cleversay-inquiry-success {
+    font-size: 15px;
+    color: #00a32a;
+    margin-top: 8px;
+}
+
+/* AI badge — see main rule above */
+
+/* ==========================================================================
+   Source Citations (v4.37.89+)
+   Sources link below RAG-fallback bubbles + slide-up panel listing the
+   citation list. Toggle is per-site; widget never shows these elements
+   when the server returns no sources.
+   ========================================================================== */
+
+.cleversay-sources-wrap {
+    display: block;
+    margin-top: 6px;
+}
+
+.cleversay-sources-link {
+    background: none;
+    border: none;
+    padding: 2px 6px;
+    font-size: 12px;
+    color: #6b7280;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.15s, color 0.15s;
+    display: inline-flex;
+    align-items: center;
+}
+
+.cleversay-sources-link:hover,
+.cleversay-sources-link:focus {
+    background: #f3f4f6;
+    color: #2271b1;
+    outline: none;
+}
+
+/* v4.37.90+: Sources panel positioning.
+ *
+ * DESKTOP: panel attaches to .cleversay-widget (the outer floating
+ *   container) and slides out horizontally. For position-bottom-right
+ *   widgets (the default), panel slides LEFT — appearing to the left
+ *   of the chat container. For position-bottom-left, panel slides
+ *   RIGHT. In both cases the panel is the same width as the chat
+ *   container, aligned to its bottom edge, so the chat content stays
+ *   fully visible while the citations are open.
+ *
+ * MOBILE: when viewport is narrow, the side-slide doesn't fit (the
+ *   chat container is already near-full-width). The panel falls back
+ *   to slide-up from the bottom inside the chat container, matching
+ *   what the older v4.37.89 design did.
+ *
+ * SHORTCODE: the inline [cleversay] embed never gets a Sources panel
+ *   (the JS skips rendering the link). No CSS needed for that case.
+ */
+
+/* Anchor: .cleversay-widget needs position:relative so the absolute-positioned
+ * panel can attach to it. Most widgets already have this. */
+.cleversay-widget {
+    position: relative;
+}
+
+/* The panel itself — desktop layout. */
+.cleversay-sources-panel {
+    position: absolute;
+    z-index: 4; /* below the chat container's content but above page bg */
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+    overflow: hidden;
+    display: none;
+    flex-direction: column;  /* JS sets display:flex when opening */
+    /* Default desktop: panel sits to the LEFT of the chat container,
+     * aligned to its bottom edge. Width matches the .cleversay-container
+     * width (425px) for symmetry. The chat container is positioned
+     * absolute within .cleversay-widget at (right:0, bottom:80px) and
+     * is 425px wide. So the panel needs to be at right:437px (425 + 12
+     * gap) to sit just to the left of the container. */
+    width: 425px;
+    bottom: 80px;
+    right: 437px;
+    /* Match the widget's height for visual parity */
+    max-height: 600px;
+    height: auto;
+    /* Hidden state: tucked behind the chat container, off to the right */
+    transform: translateX(40px);
+    opacity: 0;
+    transition: transform 0.28s ease, opacity 0.28s ease;
+}
+
+.cleversay-sources-panel.is-open {
+    transform: translateX(0);
+    opacity: 1;
+}
+
+/* For widgets positioned bottom-LEFT, slide direction reverses:
+ * panel sits to the RIGHT of the chat container, sliding right. */
+.cleversay-widget.position-bottom-left .cleversay-sources-panel {
+    left: 437px;
+    right: auto;
+    transform: translateX(-40px);
+}
+
+.cleversay-widget.position-bottom-left .cleversay-sources-panel.is-open {
+    transform: translateX(0);
+}
+
+/* Mobile fallback (≤ 600px): The narrow viewport doesn't have room
+ * for a side-by-side layout — chat container is already most of the
+ * screen. Switch to slide-up from the bottom of the viewport,
+ * positioned fixed (not absolute relative to widget). The panel
+ * effectively floats over the chat content. */
+@media (max-width: 600px) {
+    .cleversay-sources-panel {
+        position: fixed;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        top: auto;
+        width: auto;
+        max-height: 60vh;
+        z-index: 100000; /* above the widget */
+        transform: translateY(110%);
+        border-radius: 16px;
+    }
+    .cleversay-sources-panel.is-open {
+        transform: translateY(0);
+    }
+    /* Reset bottom-left override for mobile — same fixed positioning */
+    .cleversay-widget.position-bottom-left .cleversay-sources-panel {
+        left: 12px;
+        right: 12px;
+        transform: translateY(110%);
+    }
+    .cleversay-widget.position-bottom-left .cleversay-sources-panel.is-open {
+        transform: translateY(0);
+    }
+}
+
+/* Bubble meta row — AI badge left, Sources right */
+.cleversay-bubble-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+    gap: 8px;
+}
+
+/* Override the old badge wrapper margin since it now lives inside meta */
+.cleversay-bubble-meta .cleversay-ai-badge-wrap {
+    margin-top: 0;
+}
+
+/* When only Sources is in the meta row, push it to the right */
+.cleversay-bubble-meta:has(.cleversay-sources-wrap:only-child) {
+    justify-content: flex-end;
+}
+
+/* Fallback for browsers without :has() — Sources wrap always uses
+ * margin-left:auto so it floats right within flex parent regardless. */
+.cleversay-bubble-meta .cleversay-sources-wrap {
+    margin-left: auto;
+}
+
+.cleversay-sources-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px 8px;
+    border-bottom: 1px solid #f3f4f6;
+    background: #ffffff;
+    flex-shrink: 0;
+}
+
+.cleversay-sources-panel .cleversay-sources-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.cleversay-sources-panel-header h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.cleversay-sources-close {
+    background: none;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    color: #6b7280;
+    border-radius: 4px;
+    line-height: 0;
+}
+
+.cleversay-sources-close:hover,
+.cleversay-sources-close:focus {
+    background: #f3f4f6;
+    color: #1f2937;
+    outline: none;
+}
+
+.cleversay-sources-list {
+    margin: 0;
+    padding: 6px 0 12px;
+    list-style: none;
+}
+
+.cleversay-source-item {
+    list-style: none;
+    margin: 0;
+}
+
+.cleversay-source-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    color: #1f2937;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.cleversay-source-link:hover,
+.cleversay-source-link:focus {
+    background: #f9fafb;
+    outline: none;
+}
+
+.cleversay-source-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+}
+
+.cleversay-source-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.cleversay-source-title {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: #1f2937;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cleversay-source-meta {
+    display: block;
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 2px;
+}
+
+.cleversay-source-arrow {
+    flex-shrink: 0;
+    color: #9ca3af;
+}
+
+.cleversay-source-item-disabled {
+    padding: 10px 14px;
+    color: #9ca3af;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+}

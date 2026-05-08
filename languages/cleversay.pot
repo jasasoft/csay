@@ -1,0 +1,93 @@
+# Copyright (C) 2024 CleverSay Team
+# This file is distributed under the same license as the CleverSay plugin.
+msgid ""
+msgstr ""
+"Project-Id-Version: CleverSay 2.0.0\n"
+"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/cleversay\n"
+"POT-Creation-Date: 2024-01-01 00:00:00+00:00\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+
+#: admin/class-admin.php
+msgid "CleverSay"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Dashboard"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Knowledge Base"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Categories"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Synonyms"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Questions"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Inquiries"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Reports"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Settings"
+msgstr ""
+
+#: admin/class-admin.php
+msgid "Import/Export"
+msgstr ""
+
+#: public/class-public.php
+msgid "Need Help?"
+msgstr ""
+
+#: public/class-public.php
+msgid "Type your question..."
+msgstr ""
+
+#: public/class-public.php
+msgid "Hi! How can I help you today?"
+msgstr ""
+
+#: public/class-public.php
+msgid "Was this helpful?"
+msgstr ""
+
+#: public/class-public.php
+msgid "Yes"
+msgstr ""
+
+#: public/class-public.php
+msgid "No"
+msgstr ""
+
+#: public/class-public.php
+msgid "Thank you for your feedback!"
+msgstr ""
+
+#: includes/class-search.php
+msgid "I couldn't find an answer to your question."
+msgstr ""
+
+#: admin/views/settings.php
+msgid "Save Settings"
+msgstr ""
+
+#: admin/views/settings.php
+msgid "Settings saved successfully."
+msgstr ""
