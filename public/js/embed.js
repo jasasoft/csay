@@ -93,6 +93,11 @@
             .replace(/^[ \t]*[-*]\s+(.+)$/gm, '<li>$1</li>')
             .replace(/^[ \t]*\d+\.[ \t]+(.+)$/gm, '<li>$1</li>');
         h = h.replace(/(<li>[\s\S]+?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>');
+        // v4.40.4: collapse whitespace between adjacent <li> tags so the
+        // following \n→<br> conversion doesn't insert <br> between list
+        // items. Without this, list output renders as
+        // "<li>A</li><br><li>B</li>" instead of "<li>A</li><li>B</li>".
+        h = h.replace(/(<\/li>)\s+(<li>)/g, '$1$2');
         h = h.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>');
         return '<p>' + h + '</p>';
     }

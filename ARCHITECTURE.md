@@ -339,6 +339,71 @@ Without system cron, embedding processing depends on incidental site
 traffic to fire WP-Cron checks. Acceptable for Phase 2 since retrieval
 isn't using embeddings yet, but recommended before Phase 4 cutover.
 
+### Phase 3 Status (v4.40.0)
+
+**In place:**
+- Retriever class (`includes/class-retriever.php`) — singleton, performs
+  vector ANN search against Supabase, FULLTEXT search against MySQL,
+  merges with Reciprocal Rank Fusion (k=60), applies a cosine-similarity
+  gate of 0.5 on the top vector candidate.
+- `Indexer::find_relevant_chunks()` is now a thin shim. When the
+  retrieval flag is on, it delegates to `Retriever::instance()->retrieve()`
+  and pipes the result through `append_contact_chunks()`. When off,
+  control falls through to the byte-identical pre-Phase-3 FULLTEXT path.
+- New config field `cleversay_network_supabase['use_hybrid_retrieval']`,
+  default `false`. Independent from `enabled` (which controls indexing).
+- New checkbox on the network embeddings settings page under the
+  Feature Flag card. The existing "Enable Embeddings" description has
+  been corrected: it controls indexing, not retrieval.
+
+**Scope (intentional limits):**
+- **Source chunks only.** KB entries continue through
+  `Search::find_matches()` and the KB validator path. Phase 2's KB
+  embeddings are stored but unused in retrieval — kept as a future
+  option.
+- **No KB-validator changes.** Hybrid retrieval is plugged in upstream
+  of the AI prompt construction; everything between the Retriever and
+  the model is identical to Phase 2.
+
+**Failure handling (fail-open):**
+
+| Vector path state                  | Behavior                              |
+| ---------------------------------- | ------------------------------------- |
+| Embedding API error / exception    | Log warning, return FULLTEXT-only     |
+| Embeddings not configured          | Log warning, return FULLTEXT-only     |
+| Vector query throws (Supabase)     | Log warning, return FULLTEXT-only     |
+| Vector returns 0 rows              | Log warning, return FULLTEXT-only     |
+| Vector returns rows, top sim ≤ 0.5 | Distance gate fires, return empty     |
+| Vector returns rows, top sim > 0.5 | RRF-merge with FULLTEXT, return top 6 |
+
+**Observability:**
+Each query at the Retriever level emits a single INFO log with:
+`query`, `tenant_id`, `limit`, `top_vector_similarity`,
+`top_vector_chunk_id`, `vector_count`, `fulltext_count`,
+`top_fulltext_chunk_id`, `gate_triggered`, `vector_failed`,
+`returned_count`, `sources_in_top`, `overlap_count`. Warnings emitted
+on any fail-open path with the underlying error.
+
+**Not yet in place:**
+- Phase 4: cutover from FULLTEXT-only to hybrid as default
+
+**Test plan:**
+1. Deploy v4.40.0.
+2. Verify the **Use Hybrid Retrieval** checkbox appears on the network
+   embeddings page, unchecked.
+3. With the flag off, confirm FULLTEXT-only behavior is unchanged.
+4. Enable the flag.
+5. Test query: *"what do I have to do to finish my degree"* — expect
+   Graduation-page chunks ranked above Notable Alumni / How To Register.
+6. Other vocabulary-mismatch cases: *"drop a class"*, *"scholarships"*,
+   *"how do I pay my bill"*.
+7. Inspect Logger output for per-query observability data and confirm
+   `gate_triggered` / `vector_failed` are `false` for normal queries.
+8. Rollback test: temporarily mis-key the Supabase password so vector
+   path fails. Confirm the bot keeps answering and warnings are logged.
+9. If issues, untick the flag — system reverts to FULLTEXT cleanly with
+   no other changes required.
+
 ### Operational Costs
 
 Estimated monthly cost at moderate multi-tenant scale (10-30 tenants):

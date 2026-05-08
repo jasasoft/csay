@@ -113,6 +113,11 @@
             // Wrap runs of <li> in a <ul>
             html = html.replace(/(<li>[\s\S]+?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>');
 
+            // v4.40.4: collapse whitespace between adjacent <li> tags so
+            // the following \n→<br> conversion doesn't insert <br> between
+            // list items (which renders as visible blank lines in the bubble).
+            html = html.replace(/(<\/li>)\s+(<li>)/g, '$1$2');
+
             // Double newline → paragraph break
             html = html.replace(/\n{2,}/g, '</p><p>');
 

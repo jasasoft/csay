@@ -94,7 +94,20 @@ if (!defined('ABSPATH')) exit;
                             <?php esc_html_e('Enable vector retrieval for all sites with this network', 'cleversay'); ?>
                         </label>
                         <p class="description" style="margin-top:6px;">
-                            <?php esc_html_e('When off, retrieval uses FULLTEXT only (current behavior). When on, hybrid retrieval (vector + FULLTEXT) is used. This flag has no effect until Supabase connection and OpenAI API key are both configured below.', 'cleversay'); ?>
+                            <?php esc_html_e('Controls the indexing pipeline: when on, KB entries and source chunks are embedded into Supabase. Retrieval is controlled by the separate flag below. This flag has no effect until Supabase connection and OpenAI API key are both configured.', 'cleversay'); ?>
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="use_hybrid_retrieval"><?php esc_html_e('Use Hybrid Retrieval', 'cleversay'); ?></label></th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="use_hybrid_retrieval" id="use_hybrid_retrieval" value="1"
+                                   <?php checked(!empty($settings['use_hybrid_retrieval'])); ?>>
+                            <?php esc_html_e('Use hybrid (vector + FULLTEXT) retrieval for source chunks', 'cleversay'); ?>
+                        </label>
+                        <p class="description" style="margin-top:6px;">
+                            <?php esc_html_e('When off, source-chunk retrieval uses MySQL FULLTEXT only (pre-Phase-3 behavior). When on, vector and FULLTEXT results are merged via Reciprocal Rank Fusion. KB entry matching is unaffected. Falls back to FULLTEXT automatically on Supabase outage.', 'cleversay'); ?>
                         </p>
                     </td>
                 </tr>

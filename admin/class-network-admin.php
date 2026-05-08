@@ -134,11 +134,34 @@ class NetworkAdmin {
         }
 
         // Embeddings: Backfill All Existing Content (Phase 2)
+        // Iterates every site so chunks/KB entries are read from the
+        // correct per-site tables AND queued under the right blog
+        // context. Without switch_to_blog, all jobs run in blog 1's
+        // context and tag rows with tenant_id='1'. (Bug fixed in v4.40.1.)
         if (isset($_POST['cleversay_supabase_backfill_nonce'])
             && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_backfill_nonce'])), 'cleversay_supabase_backfill')
             && ($_POST['cleversay_supabase_action'] ?? '') === 'backfill'
         ) {
-            $counts = (new \CleverSay\Embedder())->backfill_all();
+            $counts = ['kb_entries' => 0, 'chunks' => 0];
+            if (is_multisite()) {
+                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
+                foreach ($sites as $site_id) {
+                    switch_to_blog((int) $site_id);
+                    try {
+                        $r = (new \CleverSay\Embedder())->backfill_all();
+                        $counts['kb_entries'] += (int) ($r['kb_entries'] ?? 0);
+                        $counts['chunks']     += (int) ($r['chunks'] ?? 0);
+                    } catch (\Throwable $e) {
+                        \CleverSay\Logger::instance()->error('Backfill failed for site', [
+                            'site_id' => $site_id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
+                    restore_current_blog();
+                }
+            } else {
+                $counts = (new \CleverSay\Embedder())->backfill_all();
+            }
             set_transient('cleversay_supabase_test_result', [
                 'success' => true,
                 'message' => sprintf(
@@ -154,11 +177,35 @@ class NetworkAdmin {
         }
 
         // Embeddings: Process Queue Now (Phase 2)
+        // Same multisite fix as Backfill — must iterate per site so each
+        // site's queue is read and processed under the correct blog
+        // context, ensuring the right tenant_id is written to Supabase.
+        // (Bug fixed in v4.40.1.)
         if (isset($_POST['cleversay_supabase_process_now_nonce'])
             && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_process_now_nonce'])), 'cleversay_supabase_process_now')
             && ($_POST['cleversay_supabase_action'] ?? '') === 'process_now'
         ) {
-            $stats = (new \CleverSay\Embedder())->process_queue();
+            $stats = ['processed' => 0, 'succeeded' => 0, 'failed' => 0];
+            if (is_multisite()) {
+                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
+                foreach ($sites as $site_id) {
+                    switch_to_blog((int) $site_id);
+                    try {
+                        $s = (new \CleverSay\Embedder())->process_queue();
+                        $stats['processed'] += (int) ($s['processed'] ?? 0);
+                        $stats['succeeded'] += (int) ($s['succeeded'] ?? 0);
+                        $stats['failed']    += (int) ($s['failed']    ?? 0);
+                    } catch (\Throwable $e) {
+                        \CleverSay\Logger::instance()->error('Process queue failed for site', [
+                            'site_id' => $site_id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
+                    restore_current_blog();
+                }
+            } else {
+                $stats = (new \CleverSay\Embedder())->process_queue();
+            }
             set_transient('cleversay_supabase_test_result', [
                 'success' => true,
                 'message' => sprintf(
@@ -175,11 +222,31 @@ class NetworkAdmin {
         }
 
         // Embeddings: Retry Failed Jobs (Phase 2)
+        // Same multisite fix as Backfill / Process Now — each site has
+        // its own queue table, so we must run the retry under each
+        // site's blog context. (Bug fixed in v4.40.1.)
         if (isset($_POST['cleversay_supabase_retry_failed_nonce'])
             && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_retry_failed_nonce'])), 'cleversay_supabase_retry_failed')
             && ($_POST['cleversay_supabase_action'] ?? '') === 'retry_failed'
         ) {
-            $reset = (new \CleverSay\Embedder())->retry_failed_jobs();
+            $reset = 0;
+            if (is_multisite()) {
+                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
+                foreach ($sites as $site_id) {
+                    switch_to_blog((int) $site_id);
+                    try {
+                        $reset += (int) (new \CleverSay\Embedder())->retry_failed_jobs();
+                    } catch (\Throwable $e) {
+                        \CleverSay\Logger::instance()->error('Retry failed jobs failed for site', [
+                            'site_id' => $site_id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
+                    restore_current_blog();
+                }
+            } else {
+                $reset = (int) (new \CleverSay\Embedder())->retry_failed_jobs();
+            }
             set_transient('cleversay_supabase_test_result', [
                 'success' => true,
                 'message' => sprintf(
@@ -628,14 +695,16 @@ class NetworkAdmin {
         if ($api_key  === '') $api_key  = (string) ($existing['openai_api_key'] ?? '');
 
         $data = [
-            'host'            => sanitize_text_field(wp_unslash($_POST['host'] ?? '')),
-            'port'            => (int) ($_POST['port'] ?? 5432),
-            'database'        => sanitize_text_field(wp_unslash($_POST['database'] ?? 'postgres')),
-            'user'            => sanitize_text_field(wp_unslash($_POST['user'] ?? 'postgres')),
-            'password'        => $password,
-            'enabled'         => !empty($_POST['enabled']),
-            'openai_api_key'  => $api_key,
-            'embedding_model' => sanitize_text_field(wp_unslash($_POST['embedding_model'] ?? 'text-embedding-3-small')),
+            'host'                 => sanitize_text_field(wp_unslash($_POST['host'] ?? '')),
+            'port'                 => (int) ($_POST['port'] ?? 5432),
+            'database'             => sanitize_text_field(wp_unslash($_POST['database'] ?? 'postgres')),
+            'user'                 => sanitize_text_field(wp_unslash($_POST['user'] ?? 'postgres')),
+            'password'             => $password,
+            'enabled'              => !empty($_POST['enabled']),
+            'openai_api_key'       => $api_key,
+            'embedding_model'      => sanitize_text_field(wp_unslash($_POST['embedding_model'] ?? 'text-embedding-3-small')),
+            // Phase 3 (v4.40.0): hybrid retrieval flag. Independent from `enabled`.
+            'use_hybrid_retrieval' => !empty($_POST['use_hybrid_retrieval']),
         ];
         \CleverSay\Supabase::save_config($data);
     }

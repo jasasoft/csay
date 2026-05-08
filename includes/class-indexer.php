@@ -218,6 +218,22 @@ class Indexer {
             $limit = (int) get_option('cleversay_ai_max_chunks', self::MAX_CHUNKS);
         }
 
+        // ── Phase 3 (v4.40.0): hybrid retrieval dispatch ─────────────────────
+        // When the per-network `use_hybrid_retrieval` flag is on, delegate
+        // to the Retriever (vector + FULLTEXT, RRF-merged). The contact-info
+        // appendix still runs on hybrid results so contact details land in
+        // the AI context regardless of which retrieval method picked them.
+        // When the flag is off, fall through to the original FULLTEXT path
+        // below — byte-identical to pre-Phase-3 behavior.
+        $supabase_cfg = \CleverSay\Supabase::get_config();
+        if (!empty($supabase_cfg['use_hybrid_retrieval'])) {
+            $results = \CleverSay\Retriever::instance()->retrieve($question, $limit);
+            if (empty($results)) {
+                return [];
+            }
+            return $this->append_contact_chunks($results);
+        }
+
         $question_clean = sanitize_text_field($question);
 
         // ── Query expansion via AI ──────────────────────────────────────

@@ -72,14 +72,18 @@ class Supabase {
      */
     public static function get_config(): array {
         $defaults = [
-            'host'            => '',
-            'port'            => 5432,
-            'database'        => 'postgres',
-            'user'            => 'postgres',
-            'password'        => '',
-            'enabled'         => false,
-            'openai_api_key'  => '',
-            'embedding_model' => 'text-embedding-3-small',
+            'host'                 => '',
+            'port'                 => 5432,
+            'database'             => 'postgres',
+            'user'                 => 'postgres',
+            'password'             => '',
+            'enabled'              => false,
+            'openai_api_key'       => '',
+            'embedding_model'      => 'text-embedding-3-small',
+            // Phase 3 (v4.40.0): gate for hybrid retrieval. Independent
+            // from `enabled` (which controls the indexing pipeline).
+            // When false, retrieval uses MySQL FULLTEXT only.
+            'use_hybrid_retrieval' => false,
         ];
 
         // Reuse the same network settings infrastructure as AI config.
