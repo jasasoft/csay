@@ -3349,13 +3349,42 @@ class Search {
                 'question' => $match['question'],
                 'response' => $match['response'],
                 'updated_at' => $match['updated_at'] ?? null,
+                // v4.42.18+: include polished_hash so downstream consumers
+                // (specifically compute_served_response → run_layer1_pipeline_for_test
+                // in the Ask Question / BulkTester paths) can run the
+                // same polish-skip check as production. Without this,
+                // the test path always re-runs polish even on entries
+                // with a valid polished_hash, inflating latency and cost
+                // relative to what production actually does.
+                'polished_hash' => $match['polished_hash'] ?? '',
             ];
         }
         
         if (!empty($matched_entries)) {
+            // v4.42.0.5+: when ALL matched entries scored at the broad-
+            // search floor (50), they're SQL "any token appears anywhere"
+            // hits, not real keyword-pattern matches. Label them clearly
+            // so the trace doesn't imply they were scored candidates.
+            // The strong-match threshold is 70 (configurable via
+            // min_match_score), so 50-point matches will never be served
+            // as Layer 1 answers — they exist only as a fallback diagnostic.
+            $top_score = (int) ($matched_entries[0]['score'] ?? 0);
+            $all_broad = true;
+            foreach ($matched_entries as $me) {
+                if ((int) ($me['score'] ?? 0) > 50) { $all_broad = false; break; }
+            }
+            if ($all_broad) {
+                $label = sprintf(
+                    /* translators: %d = number of broad fallback matches */
+                    __('Broad fallback: %d entries with overlapping words (all below strong-match threshold — will NOT be served as KB answer)', 'cleversay'),
+                    count($matched_entries)
+                );
+            } else {
+                $label = sprintf(__('Matched %d keyword(s)', 'cleversay'), count($matched_entries));
+            }
             $process_steps[] = [
                 'step' => count($process_steps) + 1,
-                'description' => sprintf(__('Matched %d keyword(s)', 'cleversay'), count($matched_entries)),
+                'description' => $label,
                 'matches' => $matched_entries,
             ];
         }

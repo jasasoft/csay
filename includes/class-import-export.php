@@ -23,6 +23,17 @@ class ImportExport {
     
     private const EXPORT_VERSION = '1.0';
     private const CHUNK_SIZE = 100;
+
+    /**
+     * Maximum number of automatic-backup files retained in the per-site
+     * uploads/cleversay-backups directory. Older files are deleted by
+     * prune_backups() after each new backup is written.
+     *
+     * v4.42.26+: introduced alongside the daily KB backup cron event
+     * that runs once per tenant per day. Prior to this, backups
+     * accumulated indefinitely.
+     */
+    public const BACKUP_KEEP = 7;
     
     /**
      * Import from legacy database
@@ -1259,6 +1270,41 @@ class ImportExport {
         usort($backups, fn($a, $b) => $b['date'] <=> $a['date']);
         
         return $backups;
+    }
+
+    /**
+     * Delete backup files beyond the retention limit. Keeps the
+     * BACKUP_KEEP newest files; deletes everything older.
+     *
+     * Used by:
+     *   - The daily KB backup cron handler (after creating a new backup)
+     *   - Manual backup creation paths that want to enforce the same cap
+     *
+     * Returns the count of files deleted (zero if under the limit).
+     * Safe to call when no backups exist or when count is already at
+     * or below BACKUP_KEEP.
+     *
+     * @since 4.42.26
+     */
+    public function prune_backups(): int {
+        $backups = $this->get_backups();  // already sorted newest first
+        if (count($backups) <= self::BACKUP_KEEP) {
+            return 0;
+        }
+        $to_delete = array_slice($backups, self::BACKUP_KEEP);
+        $deleted = 0;
+        foreach ($to_delete as $b) {
+            // Defensive: only delete files in the backup dir, never
+            // anything outside it. get_backups() builds paths from
+            // the known backup dir, but belt-and-suspenders the check.
+            $upload_dir = wp_upload_dir();
+            $backup_dir = $upload_dir['basedir'] . '/cleversay-backups';
+            if (strpos($b['path'], $backup_dir) !== 0) continue;
+            if (@unlink($b['path'])) {
+                $deleted++;
+            }
+        }
+        return $deleted;
     }
     
     /**

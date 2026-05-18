@@ -233,6 +233,8 @@
             /* ── Message body ── */
             '.cs-msg-body { display: flex; flex-direction: column; gap: 4px; max-width: 85%; }',
             '.cs-msg-label { font-size: 11px; font-weight: 600; color: var(--cs-text-light); text-transform: uppercase; letter-spacing: 0.04em; padding-left: 2px; }',
+            /* v4.41.5.8+: response-time subtitle (debug-only, gated by per-site Show Response Timing toggle) */
+            '.cs-timing { font-size: 10px; color: var(--cs-text-light); font-style: italic; opacity: 0.7; padding-left: 2px; margin-top: 2px; }',
 
             /* ── Bubbles ── */
             '.cs-bubble {',
@@ -458,6 +460,49 @@
             '@media (max-width: 600px) {',
             '  .cs-sources-panel, .cs-widget.position-bottom-right .cs-sources-panel, .cs-widget.position-bottom-left .cs-sources-panel, .cs-widget.position-top-right .cs-sources-panel, .cs-widget.position-top-left .cs-sources-panel { position: fixed; left: 12px; right: 12px; bottom: 12px; top: auto; width: auto; max-height: 60vh; z-index: 2147483647; transform: translateY(110%); border-radius: 16px; }',
             '  .cs-sources-panel.is-open, .cs-widget.position-bottom-right .cs-sources-panel.is-open, .cs-widget.position-bottom-left .cs-sources-panel.is-open, .cs-widget.position-top-right .cs-sources-panel.is-open, .cs-widget.position-top-left .cs-sources-panel.is-open { transform: translateY(0); }',
+
+            /* v4.42.24+: Fullscreen chat panel on mobile.
+             *
+             * On desktop the panel is a 370px floating card. On a phone
+             * that leaves cramped gutters and an oddly-positioned input
+             * once the keyboard appears. Standard pattern for chat
+             * widgets (Intercom, Drift, Zendesk Messaging) is to take
+             * over the full viewport on mobile, which is what these
+             * rules do.
+             *
+             * dvh (dynamic viewport height) accounts for iOS Safari's
+             * URL bar appearing/hiding. The vh fallback handles older
+             * browsers where dvh isn\'t supported — they fall back to
+             * the static viewport height, which is fine, just less
+             * snappy when the URL bar changes state.
+             *
+             * The position-* overrides reset the corner anchoring that
+             * the desktop styles applied. We don\'t need top/right/left/
+             * bottom positioning when we\'re taking over the full screen
+             * — left:0 + top:0 is sufficient. !important is used because
+             * the position-specific rules above have higher specificity
+             * and would otherwise win.
+             *
+             * Hiding the toggle button while the panel is active prevents
+             * the floating button from showing through any transparent
+             * pixel — the in-header close button is the way out. */
+            '  .cs-widget.active .cs-container,',
+            '  .cs-widget.active.position-bottom-right .cs-container,',
+            '  .cs-widget.active.position-bottom-left .cs-container,',
+            '  .cs-widget.active.position-top-right .cs-container,',
+            '  .cs-widget.active.position-top-left .cs-container {',
+            '    position: fixed !important;',
+            '    top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;',
+            '    width: 100vw !important; max-width: 100vw !important;',
+            '    height: 100vh !important; height: 100dvh !important;',
+            '    max-height: none !important;',
+            '    border-radius: 0 !important;',
+            '    box-shadow: none !important;',
+            '  }',
+            /* Hide the floating toggle button when the chat is open
+             * fullscreen — it would otherwise sit on top of the panel
+             * with no useful purpose. */
+            '  .cs-widget.active .cs-toggle { display: none; }',
             '}',
         ].join('\n');
     }
@@ -523,6 +568,14 @@
         var messages  = root.querySelector('.cs-messages');
         var input     = root.querySelector('.cs-input');
         var submit    = root.querySelector('.cs-submit');
+
+        // v4.42.7+: scrollToBottom helper was removed — Terser's mangler
+        // was dropping the function definition while keeping the calls
+        // intact, producing a ReferenceError at runtime. Calls have been
+        // replaced with inline `messages.scrollTop = messages.scrollHeight`,
+        // matching the existing pattern used in 4 other places. Don't
+        // re-introduce a named scroll helper here without testing
+        // against the minified output.
 
         // Conversation history for this session — sent with each request
         // so AI can resolve follow-up questions like "what about part-time?"
@@ -678,9 +731,25 @@
                     conversation_id: conversationId,
                 }, data);
 
-                post(cfg.ajaxUrl, payload, function (resp) {
+                post(cfg.ajaxUrl, payload, function (err, resp) {
+                    // v4.42.28+: corrected callback signature. The post()
+                    // helper calls cb(null, parsedResponse) on success and
+                    // cb(error) on failure — TWO arguments. The previous
+                    // single-arg form `function (resp)` was reading the
+                    // ERROR slot as the response. On a successful submit,
+                    // resp would be null (because err is null), so
+                    // `resp && resp.success` evaluated to false and the
+                    // widget showed "Could not submit" even though the
+                    // lead had been saved server-side. Confirmed: line
+                    // 1394 and 1786 (the other post() call sites with
+                    // result handling) use the correct (err, r) shape.
                     btn.disabled = false;
                     btn.textContent = (cfg.leadCapture && cfg.leadCapture.submitLabel) || 'Continue';
+                    if (err) {
+                        errorEl.textContent = 'Network error. Please try again.';
+                        errorEl.style.display = 'block';
+                        return;
+                    }
                     if (resp && resp.success) {
                         try { localStorage.setItem(LEAD_STORAGE_KEY, String(Date.now())); } catch (_) {}
                         unlockChatAndSwap(cfg.welcomeMessage || 'Thanks! How can I help you today?');
@@ -1064,6 +1133,30 @@
             return div;
         }
 
+        // v4.41.5.8+: render a small "Response time" subtitle below a bot
+        // message. Only invoked when cfg.showTiming is true (the per-site
+        // Show Response Timing toggle). Format: client round-trip (what
+        // the user perceives) with the server total in parentheses if
+        // available. Never throws — silently returns when div is missing
+        // or shape is unexpected.
+        function appendTiming(messageDiv, clientMs, serverMs) {
+            if (!messageDiv) return;
+            var body = messageDiv.querySelector('.cs-msg-body');
+            if (!body) return;
+            function fmt(ms) {
+                if (ms === null || ms === undefined || isNaN(ms)) return '—';
+                if (ms < 1000) return Math.round(ms) + ' ms';
+                return (ms / 1000).toFixed(2) + ' s';
+            }
+            var serverPart = (serverMs !== null && serverMs !== undefined)
+                ? ' (server: ' + fmt(serverMs) + ')'
+                : '';
+            var t = document.createElement('div');
+            t.className = 'cs-timing';
+            t.textContent = 'Response time: ' + fmt(clientMs) + serverPart;
+            body.appendChild(t);
+        }
+
         function showTyping() {
             return appendMessage('bot',
                 '<span class="cs-typing"><span></span><span></span><span></span></span>'
@@ -1285,7 +1378,7 @@
                 var formMsg = appendMessage('bot', esc(introText));
                 var formBody = formMsg.querySelector('.cs-msg-body') || formMsg;
                 showInquiryForm(formBody, question);
-                scrollToBottom();
+                if (messages) messages.scrollTop = messages.scrollHeight;
             });
 
             btns.querySelector('.cs-yesno-no').addEventListener('click', function (e) {
@@ -1294,15 +1387,18 @@
                 _pendingInquiryQuestion = null;
                 appendMessage('user', esc(cfg.strings.inquiryNo || 'No, thanks'));
                 appendMessage('bot', esc(cfg.strings.inquiryDeclined || 'No problem! Feel free to ask if you have other questions.'));
-                scrollToBottom();
+                if (messages) messages.scrollTop = messages.scrollHeight;
             });
 
-            scrollToBottom();
+            if (messages) messages.scrollTop = messages.scrollHeight;
         }
 
         function doSearch(question) {
             if (!rateOk()) return;
             var typing = showTyping();
+            // v4.41.5.8+: capture client round-trip start. Done outside
+            // the post() so any time spent in the helper itself counts.
+            var clientStart = Date.now();
 
             post(cfg.ajaxUrl, {
                 action:      'cleversay_search',
@@ -1312,22 +1408,40 @@
                 history:     JSON.stringify(conversationHistory.slice(-6)),
                 context:     'embed',
             }, function (err, r) {
+                // v4.41.5.8+: client + server timing capture. clientMs is
+                // what the user actually waits for (network + render
+                // included). serverMs is what the server's RequestTimer
+                // measured for total request work; it's injected into
+                // r.data.total_ms when cfg.showTiming is on (the per-site
+                // toggle on the server side gates injection). withTiming
+                // wraps each appendMessage('bot', ...) site so timing
+                // attaches to whichever response message actually got
+                // rendered for this query.
+                var clientMs = Date.now() - clientStart;
+                var serverMs = (r && r.data && typeof r.data.total_ms === 'number')
+                    ? r.data.total_ms
+                    : null;
+                function withTiming(div) {
+                    if (cfg.showTiming && div) appendTiming(div, clientMs, serverMs);
+                    return div;
+                }
+
                 typing.remove();
                 if (err) {
                     console.error('[CleverSay] Search error:', err);
-                    appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.'));
+                    withTiming(appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.')));
                     return;
                 }
                 if (!r.success) {
                     console.warn('[CleverSay] Search failed:', JSON.stringify(r));
-                    appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.'));
+                    withTiming(appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.')));
                     return;
                 }
 
                 var d = r.data;
                 if (!d.found || !d.answers || !d.answers.length) {
                     var noMsg = d.no_answer_message || cfg.strings.noAnswer || 'Sorry, I could not find an answer.';
-                    appendMessage('bot', esc(noMsg));
+                    withTiming(appendMessage('bot', esc(noMsg)));
                     // Record no-answer in history so AI knows context
                     conversationHistory.push({ type: 'user', content: question });
                     conversationHistory.push({ type: 'bot',  content: noMsg });
@@ -1373,7 +1487,7 @@
                 var rawAnswer   = firstAnswer.answer || firstAnswer.response || '';
 
                 if (!rawAnswer) {
-                    appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.'));
+                    withTiming(appendMessage('bot', esc(cfg.strings.noAnswer || 'Sorry, I could not find an answer.')));
                     return;
                 }
 
@@ -1390,7 +1504,7 @@
                     return part; // odd = existing anchor, leave alone
                 }).join('');
 
-                var answerDiv = appendMessage('bot', processed);
+                var answerDiv = withTiming(appendMessage('bot', processed));
 
                 // Tag AI-generated answers so CSS can style the follow-up
                 // suggestion paragraph (the trailing paragraph the AI adds
@@ -1561,7 +1675,7 @@
                     } else {
                         appendMessage('bot', esc(cfg.strings.inquiryDeclined || 'No problem! Feel free to ask if you have other questions.'));
                     }
-                    scrollToBottom();
+                    if (messages) messages.scrollTop = messages.scrollHeight;
                     return;
                 }
                 // Not a yes/no — treat as a new question and clear the pending state
@@ -1672,6 +1786,10 @@
             // Bridge message + typing indicator
             appendMessage('bot', 'Sorry that wasn\'t helpful! Let me try again…');
             var typing2 = showTyping();
+            // v4.41.5.8+: timing capture for the force_ai re-ask path. Same
+            // pattern as doSearch — clientStart before post, withTiming
+            // wrapper around each appendMessage('bot', ...) site.
+            var clientStart2 = Date.now();
 
             post(cfg.ajaxUrl, {
                 action:      'cleversay_search',
@@ -1682,9 +1800,18 @@
                 context:     'embed',
                 force_ai:    '1',
             }, function (err, r) {
+                var clientMs2 = Date.now() - clientStart2;
+                var serverMs2 = (r && r.data && typeof r.data.total_ms === 'number')
+                    ? r.data.total_ms
+                    : null;
+                function withTiming2(div) {
+                    if (cfg.showTiming && div) appendTiming(div, clientMs2, serverMs2);
+                    return div;
+                }
+
                 typing2.remove();
                 if (err) {
-                    appendMessage('bot', 'I wasn\'t able to find a better answer.');
+                    withTiming2(appendMessage('bot', 'I wasn\'t able to find a better answer.'));
                     if (cfg.enableInquiry) askInquiry(lastUserQ);
                     return;
                 }
@@ -1694,7 +1821,7 @@
                 if (aiText) {
                     var isHtml2  = /<[a-zA-Z][\s\S]*>/.test(aiText);
                     var rendered = isHtml2 ? aiText : md(aiText);
-                    var aiDiv    = appendMessage('bot', rendered);
+                    var aiDiv    = withTiming2(appendMessage('bot', rendered));
                     aiDiv.querySelectorAll('a[href]').forEach(function(a) {
                         a.setAttribute('target', '_blank');
                         a.setAttribute('rel', 'noopener noreferrer');
@@ -1716,7 +1843,7 @@
                         aiDiv.querySelector('.cs-msg-body').appendChild(ratingDiv2);
                     }
                 } else {
-                    appendMessage('bot', 'I wasn\'t able to find a better answer for that.');
+                    withTiming2(appendMessage('bot', 'I wasn\'t able to find a better answer for that.'));
                     if (cfg.enableInquiry) askInquiry(lastUserQ);
                 }
             });

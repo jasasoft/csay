@@ -40,6 +40,21 @@ class AI {
 
     private const PROVIDER_ANTHROPIC = 'anthropic';
     private const PROVIDER_GEMINI    = 'gemini';
+    // v4.42.2+: third provider for evaluating GPT-4o mini as a
+    // synthesis candidate. Added narrowly for the current model-
+    // selection sprint — see CONTEXT_TRANSFER notes. If you find
+    // yourself adding a fourth or fifth provider, refactor the open-
+    // coded 9-case dispatch in answer_with_context/polish_kb_response
+    // into a single send_with_model() helper. That refactor was
+    // deliberately deferred here because we don't expect more
+    // providers; the dispatch only needs to cover {Anthropic, Gemini,
+    // OpenAI} for the v4.42.x line.
+    private const PROVIDER_OPENAI    = 'openai';
+
+    // v4.42.2+: OpenAI chat completions endpoint. Same base URL for
+    // gpt-4o-mini, gpt-4o, and the gpt-4.1 family; model is selected
+    // via the 'model' field in the request body, not the URL path.
+    private const OPENAI_API_BASE = 'https://api.openai.com/v1/chat/completions';
 
     /** Pricing per million tokens (USD) */
     private const PRICING = [
@@ -63,12 +78,28 @@ class AI {
         'gemini-3-flash-preview'        => ['input' => 0.50,  'output' => 3.00,  'provider' => 'gemini'],
         'gemini-3.1-flash-lite-preview' => ['input' => 0.25,  'output' => 1.50,  'provider' => 'gemini'],
         'gemini-2.5-flash'              => ['input' => 0.30,  'output' => 2.50,  'provider' => 'gemini'],
+
+        // OpenAI (added v4.42.2 — single model for evaluation purposes).
+        // Pricing verified Jan 2026 via openai.com/api/pricing — re-
+        // verify before adding additional OpenAI models, OpenAI revises
+        // model prices more frequently than Anthropic does.
+        'gpt-4o-mini'                => ['input' => 0.15,  'output' => 0.60,  'provider' => 'openai'],
+
+        // v4.42.5+: GPT-5.4 mini. Launched March 2026 as a successor to
+        // gpt-4o-mini. Pricing verified May 2026 via openai.com docs:
+        // $0.75/$4.50 per MTok with a 400k context window. Targets the
+        // Sonnet-equivalent quality tier at substantially lower cost
+        // (~4x cheaper input, ~3x cheaper output than Sonnet 4.6).
+        // Added for synthesis-quality A/B against Sonnet.
+        'gpt-5.4-mini'               => ['input' => 0.75,  'output' => 4.50,  'provider' => 'openai'],
     ];
+
 
     private string $api_key;
     private string $model;
     private string $validator_model; // v4.37.117+: separate model for KB validator
     private string $synthesis_model; // v4.37.131+: separate model for AI fallback synthesis
+    private string $polish_model;    // v4.42.1+: separate model for KB polish step
     private string $provider; // 'anthropic' | 'gemini'
     private int    $max_tokens;
     private Logger $logger;
@@ -84,7 +115,7 @@ class AI {
         if (function_exists('is_multisite') && is_multisite()) {
             $cfg = \CleverSay\NetworkSettings::get_ai_config();
             $this->api_key    = (string) ($cfg['api_key']    ?? '');
-            $this->max_tokens = (int)    ($cfg['max_tokens'] ?? 450);
+            $this->max_tokens = (int)    ($cfg['max_tokens'] ?? 1000);
 
             // Network model is the default. Per-site override (if non-empty)
             // wins — this lets super-admins A/B specific clients on Sonnet
@@ -106,6 +137,13 @@ class AI {
             // higher for the kind of contact info students will act on.
             $this->synthesis_model = (string) ($cfg['synthesis_model'] ?? 'claude-sonnet-4-5-20250929');
 
+            // v4.42.1+: polish runs on its own knob. Defaults to Haiku
+            // (same as the general default model) because polish is a
+            // constrained transformation — keep all facts, rewrite tone
+            // only. Operators can lift to Sonnet if they observe Haiku
+            // altering facts during polish.
+            $this->polish_model = (string) ($cfg['polish_model'] ?? 'claude-haiku-4-5-20251001');
+
             // Re-resolve key if site override switched providers. Fallback
             // chain mirrors get_ai_config but uses the override-aware model.
             if (!empty($site_override) && $site_override !== $network_model) {
@@ -123,7 +161,8 @@ class AI {
             $this->model      = (string) ($cfg['model']      ?? 'claude-haiku-4-5-20251001');
             $this->validator_model = (string) ($cfg['validator_model'] ?? 'claude-sonnet-4-5-20250929');
             $this->synthesis_model = (string) ($cfg['synthesis_model'] ?? 'claude-sonnet-4-5-20250929');
-            $this->max_tokens = (int)    ($cfg['max_tokens'] ?? 450);
+            $this->polish_model    = (string) ($cfg['polish_model']    ?? 'claude-haiku-4-5-20251001');
+            $this->max_tokens = (int)    ($cfg['max_tokens'] ?? 1000);
         }
 
         // v4.37.43+: derive provider from the model. Each model in
@@ -472,13 +511,55 @@ class AI {
         $system = "You are a writing assistant for {$school_ref}. Your ONLY job is to rewrite the provided answer in a {$tone_desc} tone. STRICT RULES: (1) Rewrite EXACTLY what is given — do not add, remove, or evaluate the content. (2) Keep ALL facts, names, numbers, contact details, and URLs exactly as-is. (3) Use 'our' and 'we' instead of 'the school'. (4) Be concise — do not add information not already in the answer. (5) Use **bold** for key contact details only. (6) Preserve all URLs as plain URLs. (7) NEVER comment on whether the answer is correct, relevant, or complete. (8) NEVER ask questions or request more information. (9) NEVER say the answer is wrong or off-topic. (10) Return ONLY the rewritten text — nothing else, no preamble, no commentary.";
 
         $payload = [
-            'model'      => $this->model,
-            'max_tokens' => 400,
+            'model'      => $this->polish_model,
+            // v4.42.12+: raised from 400 to 2000. The polisher is asked
+            // to rewrite KB entries which can themselves be long (1500+
+            // char policy answers like the academic-probation entry).
+            // At 400 tokens the polisher silently truncated long
+            // entries mid-sentence — the failure mode that produced
+            // the "Once placed on probation [end]" cutoff in v4.42.11
+            // testing. 2000 gives comfortable headroom for any KB
+            // entry shape; we only pay for tokens actually generated,
+            // so the higher ceiling adds zero cost on shorter answers.
+            'max_tokens' => 2000,
             'system'     => $system,
             'messages'   => [['role' => 'user', 'content' => "Question: {$question}\n\nAnswer to rewrite:\n{$raw_response}"]],
         ];
 
-        $body = $this->make_api_call($payload);
+        // v4.42.1+ / v4.42.2+: route the polish call to the PROVIDER OF
+        // polish_model, not the active default provider. Same provider-
+        // agnostic swap pattern as synthesis — see answer_with_context
+        // for the rationale and history.
+        $polish_provider = self::PRICING[$this->polish_model]['provider'] ?? self::PROVIDER_ANTHROPIC;
+        if ($polish_provider === $this->provider) {
+            $body = $this->make_api_call($payload);
+        } else {
+            $cfg = NetworkSettings::get_ai();
+            $knob_key = match ($polish_provider) {
+                self::PROVIDER_ANTHROPIC => (string) ($cfg['anthropic_api_key'] ?? ''),
+                self::PROVIDER_GEMINI    => (string) ($cfg['gemini_api_key']    ?? ''),
+                self::PROVIDER_OPENAI    => (string) ($cfg['openai_api_key']    ?? ''),
+                default => '',
+            };
+            $original_model    = $this->model;
+            $original_api_key  = $this->api_key;
+            $original_provider = $this->provider;
+            $this->model       = $this->polish_model;
+            $this->api_key     = $knob_key;
+            $this->provider    = $polish_provider;
+            try {
+                $body = match ($polish_provider) {
+                    self::PROVIDER_ANTHROPIC => $this->make_api_call_anthropic($payload),
+                    self::PROVIDER_GEMINI    => $this->make_api_call_gemini($payload),
+                    self::PROVIDER_OPENAI    => $this->make_api_call_openai($payload),
+                    default                  => ['error' => "Unknown polish provider: {$polish_provider}"],
+                };
+            } finally {
+                $this->model    = $original_model;
+                $this->api_key  = $original_api_key;
+                $this->provider = $original_provider;
+            }
+        }
         if (isset($body['error']) || empty($body['content'][0]['text'])) {
             return null;
         }
@@ -488,6 +569,33 @@ class AI {
         $this->track_usage($input_tokens, $output_tokens, $cost);
         $polished = trim($body['content'][0]['text']);
 
+        // v4.42.12+: detect truncation on the polish call. Same detector
+        // as answer_with_context — covers both the max_tokens-budget case
+        // (stop_reason='max_tokens') and the heuristic mid-sentence case
+        // (tail not terminated). The polish path was the silent culprit
+        // behind the academic-probation truncation in v4.42.11 testing:
+        // budget was 400, KB entry was ~1500 chars, output hit ceiling.
+        $polish_stop_reason = (string) ($body['stop_reason'] ?? 'unknown');
+        $polish_tail        = substr($polished, -120);
+        if ($polish_stop_reason === 'max_tokens') {
+            $this->logger->warning('Polish response truncated by max_tokens', [
+                'model'         => $this->polish_model,
+                'output_tokens' => $output_tokens,
+                'answer_length' => strlen($polished),
+                'answer_tail'   => $polish_tail,
+                'hint'          => 'Polish budget is too low for this KB entry. Raise the polish max_tokens in class-ai.php (currently 2000).',
+            ]);
+        } elseif ($this->tail_looks_truncated($polished)) {
+            $this->logger->warning('Polish response appears truncated mid-sentence (non-budget cause)', [
+                'model'         => $this->polish_model,
+                'stop_reason'   => $polish_stop_reason,
+                'output_tokens' => $output_tokens,
+                'answer_length' => strlen($polished),
+                'answer_tail'   => $polish_tail,
+                'hint'          => 'stop_reason was not max_tokens — investigate API response.',
+            ]);
+        }
+
         // v4.37.127+: strip preamble lines that occasionally leak
         // through polish output despite the "no preamble" prompt rule.
         // Pattern: a first line like "Here's your rewritten answer
@@ -495,7 +603,250 @@ class AI {
         // If first line matches a preamble pattern, drop it.
         $polished = $this->strip_polish_preamble($polished);
 
+        // v4.42.15+: convert the polish prompt's "use **bold** for key
+        // contact details" markup to HTML before sending. Without this,
+        // the widget's innerHTML render shows the literal ** markers.
+        // Also handles improvised __double underscores__ and the
+        // occasional [text](url) markdown link.
+        $polished = self::convert_minimal_markdown_to_html($polished);
+
         return $polished;
+    }
+
+    /**
+     * v4.42.15+: convert a small whitelisted set of markdown patterns
+     * to HTML before the answer is shipped to the widget.
+     *
+     * Why this exists
+     * ---------------
+     * Both the polish prompt and the synthesis prompt instruct the model
+     * to use markdown formatting (**bold** for emphasis, bullet lists for
+     * multi-step procedures, links for resources). The widget's
+     * appendMessage renders bot responses via innerHTML — which means raw
+     * markdown markers appear LITERALLY on screen unless converted to
+     * HTML server-side first.
+     *
+     * Implementation (v4.42.22+)
+     * --------------------------
+     * Uses Parsedown (https://github.com/erusev/parsedown) as the
+     * underlying markdown parser. Parsedown handles the full
+     * conventional markdown set: bullets, ordered lists, headings,
+     * bold, italic, links, paragraphs, line breaks, etc. — which means
+     * the model is free to use whatever structure naturally improves
+     * readability for the content type.
+     *
+     * v4.42.29+: Parsedown ships inside the plugin (includes/lib/
+     * Parsedown.php) rather than as a separately-installed dependency.
+     * Earlier versions required admins to drop the file in; that broke
+     * on every upgrade because the updater's atomic-swap deploy
+     * replaces the entire plugin directory. Vendoring eliminates that
+     * failure mode.
+     *
+     * If Parsedown is somehow missing at runtime (file accidentally
+     * deleted, permission issue, customized build), this method falls
+     * back to the legacy v4.42.15-era whitelist converter: **bold**,
+     * __bold__, and [text](http-url) markdown links. The fallback is
+     * the safety net; under normal operation, the Parsedown path always
+     * runs. The CleverSay Tools → Parsedown Status admin page reports
+     * which path is active.
+     *
+     * Safety
+     * ------
+     * Parsedown is configured with setSafeMode(true), which strips raw
+     * HTML from input and filters dangerous URL schemes (javascript:,
+     * data:, vbscript:, etc.). After parsing, generated <a> tags are
+     * post-processed to add target="_blank" rel="noopener noreferrer"
+     * so widget links open in a new tab and don't expose window.opener.
+     *
+     * Idempotence
+     * -----------
+     * Running this twice on already-HTML output is mostly a no-op:
+     * Parsedown leaves existing HTML alone in safe mode (strips it,
+     * actually, but the markdown that would have produced equivalent
+     * HTML isn't present a second time). Edge case: if the first pass
+     * emitted `<p>...</p>` and the same text is fed back, Parsedown
+     * may wrap it again or strip it depending on safe-mode config.
+     * In practice this isn't an issue — each call site runs the
+     * converter once per response.
+     *
+     * @param string $text The raw AI/polish answer.
+     * @return string Markdown converted to HTML, or original text on error.
+     * @since 4.42.15
+     * @since 4.42.22 Switched to Parsedown when available; legacy fallback otherwise.
+     * @since 4.42.29 Parsedown vendored — no longer needs separate install.
+     */
+    public static function convert_minimal_markdown_to_html(string $text): string {
+        if ($text === '') return $text;
+
+        // v4.42.35+: Idempotence guard. If the input already contains HTML
+        // tags, do NOT pass it through Parsedown. Parsedown in safe mode
+        // HTML-ESCAPES raw tags rather than stripping them — so a second
+        // pass over `<p>...<a href=...>` produces `&lt;p&gt;...&lt;a
+        // href=...&gt;`, and a third pass escapes the entities again.
+        // The result is visible HTML tag text in the rendered answer
+        // plus corrupted URLs (the entity-escaped href confuses the
+        // post-process anchor regex).
+        //
+        // The converter is called from multiple paths (polish, clean_
+        // response_html, broad-search fallback) and content can flow
+        // through more than one of them in sequence. Adding this guard
+        // makes the converter idempotent on any input shape — already
+        // HTML stays HTML, markdown gets converted to HTML, mixed input
+        // is treated as HTML (safer than re-parsing).
+        //
+        // Detection: presence of an opening tag for any of the elements
+        // Parsedown itself would emit. Cheap regex, no DOM parsing.
+        $looks_like_html = (bool) preg_match(
+            '/<(p|a|ul|ol|li|strong|em|h[1-6]|br|blockquote|code|pre)(\s|>|\/)/i',
+            $text
+        );
+
+        if ($looks_like_html) {
+            // Run only the <a> post-process so anchors still get
+            // target="_blank" rel="noopener noreferrer" applied — this
+            // is the same post-process Parsedown output normally gets.
+            // Apply it to existing HTML so the behavior is consistent
+            // regardless of how the HTML got there.
+            return self::add_anchor_attrs($text);
+        }
+
+        // Prefer Parsedown when the library is installed. Use require_once
+        // with a path check so we don't error out if the file is missing.
+        $parsedown_path = CLEVERSAY_PLUGIN_DIR . 'includes/lib/Parsedown.php';
+        if (!class_exists('Parsedown') && is_readable($parsedown_path)) {
+            require_once $parsedown_path;
+        }
+
+        if (class_exists('Parsedown')) {
+            try {
+                $pd = new \Parsedown();
+                // Strip raw HTML from input — the model occasionally emits
+                // <a> tags or stray tags, and we don't want those passing
+                // through unfiltered. With safe mode, all rendering goes
+                // through Parsedown's HTML emission, which we trust.
+                // Note: with the idempotence guard above, raw-HTML input
+                // never reaches this branch — but safe mode stays on as
+                // defense-in-depth in case the heuristic misses an edge
+                // case.
+                $pd->setSafeMode(true);
+                // Treat single newlines as <br>. The model produces single-
+                // newline-separated lines for things like contact info
+                // ("Email: x\nPhone: y") and we want those to visually
+                // break apart, not flow into one line.
+                $pd->setBreaksEnabled(true);
+                // Disable Parsedown's URL/email auto-linking. We want
+                // explicit `[text](url)` only — auto-linking turns plain
+                // URLs in the answer into clickable links, which can
+                // accidentally happen on partial text the model didn't
+                // intend as a link.
+                $pd->setUrlsLinked(false);
+
+                $html = $pd->text($text);
+                return self::add_anchor_attrs($html);
+            } catch (\Throwable $e) {
+
+                return self::add_anchor_attrs($html);
+            } catch (\Throwable $e) {
+                // If Parsedown fails for any reason (e.g., bad input that
+                // triggers an internal error), fall back to the legacy
+                // converter rather than failing the whole response.
+                if (class_exists('\\CleverSay\\Logger')) {
+                    \CleverSay\Logger::instance()->warning('Parsedown failed, using legacy converter', [
+                        'error'         => $e->getMessage(),
+                        'input_length'  => strlen($text),
+                    ]);
+                }
+                // Fall through to legacy path below.
+            }
+        }
+
+        // Legacy fallback: narrow whitelist converter from v4.42.15. Used
+        // when Parsedown isn't installed or threw an exception. Handles
+        // the three patterns most critical for KB content: bold, bold
+        // (underscore form), and http(s) links.
+        //
+        // ORDERING: do bold patterns FIRST, then markdown links. Why?
+        // If we convert links first, the resulting <a> tag has rel="noopener
+        // noreferrer" which contains underscores — and those break the
+        // surrounding `__...__` bold pattern that the model sometimes
+        // wraps around markdown links (e.g. __[FAFSA](url)__). By doing
+        // bold first, the bold wrapper is processed before any HTML
+        // attribute strings enter the buffer.
+
+        // 1. Bold via **double asterisks**. Pattern must NOT match a single
+        //    `*` or three+ in a row, and must not span newlines. The non-
+        //    greedy quantifier prevents matching across multiple bold runs.
+        //    The negative lookahead/behind on `*` prevents matching part
+        //    of a `***triple***` literal.
+        $text = preg_replace(
+            '/(?<!\*)\*\*(?!\*)([^*\n]+?)(?<!\*)\*\*(?!\*)/u',
+            '<strong>$1</strong>',
+            $text
+        );
+
+        // 2. Bold via __double underscores__. Same shape as above. Some
+        //    models emit this variant; treat it identically.
+        $text = preg_replace(
+            '/(?<!_)__(?!_)([^_\n]+?)(?<!_)__(?!_)/u',
+            '<strong>$1</strong>',
+            $text
+        );
+
+        // 3. Markdown links: [label](url). Restrict to http/https schemes.
+        //    Runs after bold so any __[label](url)__ pattern has already
+        //    been wrapped in <strong>; what's left for this pass is the
+        //    inner [label](url) which is converted to an <a> tag.
+        $text = preg_replace_callback(
+            '/\[([^\[\]\n]+?)\]\((https?:\/\/[^\s\)]+)\)/u',
+            static function ($m) {
+                $label = $m[1];
+                $url   = $m[2];
+                // Escape the label so embedded HTML (unlikely but possible)
+                // can't sneak through. esc_url() validates and normalizes
+                // the URL.
+                $safe_url   = esc_url($url);
+                $safe_label = esc_html($label);
+                if ($safe_url === '') {
+                    // Couldn't validate URL — return the original markdown
+                    // unchanged rather than emitting a broken link.
+                    return $m[0];
+                }
+                return '<a href="' . $safe_url . '" target="_blank" rel="noopener noreferrer">' . $safe_label . '</a>';
+            },
+            $text
+        );
+
+        return is_string($text) ? $text : '';
+    }
+
+    /**
+     * Post-process: ensure every <a href="..."> tag has
+     * target="_blank" rel="noopener noreferrer". Idempotent — anchors
+     * that already have a target attribute are skipped, so running
+     * this multiple times produces no duplicate attributes.
+     *
+     * Called from both convert_minimal_markdown_to_html branches:
+     * the HTML-passthrough path (input already had anchors) and the
+     * Parsedown-output path (anchors freshly emitted by markdown
+     * conversion). Single source of truth for anchor behavior.
+     *
+     * @since 4.42.35 extracted from inline duplicate
+     */
+    private static function add_anchor_attrs(string $html): string {
+        return (string) preg_replace_callback(
+            '/<a href="([^"]+)"((?:\s+[a-z-]+="[^"]*")*)>/i',
+            static function ($m) {
+                $href  = $m[1];
+                $attrs = $m[2];
+                // Skip if target already present — keeps the method
+                // idempotent across repeated passes.
+                if (stripos($attrs, 'target=') !== false) {
+                    return $m[0];
+                }
+                return '<a href="' . $href . '"' . $attrs . ' target="_blank" rel="noopener noreferrer">';
+            },
+            $html
+        );
     }
 
     /**
@@ -697,18 +1048,59 @@ class AI {
             'temperature' => 0.2,
         ];
 
-        // v4.37.131+: synthesis runs on $this->synthesis_model
-        // (default Sonnet 4.5), independent of the main $this->model.
-        // If synthesis_model's provider differs from the active
-        // provider (e.g., main on Gemini, synthesis on Anthropic),
-        // route through the dedicated Anthropic call helper which
-        // resolves the per-provider Anthropic key. Otherwise use the
-        // normal call path.
+        // v4.37.131+ / v4.41.5.5+ / v4.42.2+: route the synthesis call to
+        // the PROVIDER OF synthesis_model, not the active default provider.
+        //
+        // History:
+        //   - Pre-v4.41.5.5 routed via $this->provider unconditionally,
+        //     which silently sent the wrong model id to the default
+        //     provider's API when the two providers differed (most
+        //     visible failure: Gemini synthesis model + Anthropic
+        //     default produced opaque "model: gemini-3-flash-preview"
+        //     400s from Anthropic, never reached Google).
+        //   - v4.41.5.5 fixed with an open-coded 4-case switch covering
+        //     {Anthropic, Gemini} × {Anthropic, Gemini}.
+        //   - v4.42.2 added OpenAI as a third provider, expanding to 9
+        //     cases. To keep the code readable, we no longer enumerate
+        //     each combination — instead: if knob_provider matches
+        //     $this->provider, the normal dispatcher routes correctly;
+        //     otherwise we swap $this->model, $this->api_key, and
+        //     $this->provider to the knob's values, call the knob
+        //     provider's specific method, and restore in `finally`.
+        //
+        // Adding a fourth provider later (e.g., xAI, Mistral): add the
+        // case to make_api_call's dispatcher and add a switch arm below.
         $synthesis_provider = self::PRICING[$this->synthesis_model]['provider'] ?? self::PROVIDER_ANTHROPIC;
-        if ($synthesis_provider === self::PROVIDER_ANTHROPIC && $this->provider !== self::PROVIDER_ANTHROPIC) {
-            $raw = $this->call_validator_api($payload);
-        } else {
+        if ($synthesis_provider === $this->provider) {
+            // Knob matches default — normal dispatcher routes correctly.
             $raw = $this->make_api_call($payload);
+        } else {
+            // Knob differs from default — swap state, call knob's method.
+            $cfg = NetworkSettings::get_ai();
+            $knob_key = match ($synthesis_provider) {
+                self::PROVIDER_ANTHROPIC => (string) ($cfg['anthropic_api_key'] ?? ''),
+                self::PROVIDER_GEMINI    => (string) ($cfg['gemini_api_key']    ?? ''),
+                self::PROVIDER_OPENAI    => (string) ($cfg['openai_api_key']    ?? ''),
+                default => '',
+            };
+            $original_model    = $this->model;
+            $original_api_key  = $this->api_key;
+            $original_provider = $this->provider;
+            $this->model       = $this->synthesis_model;
+            $this->api_key     = $knob_key;
+            $this->provider    = $synthesis_provider;
+            try {
+                $raw = match ($synthesis_provider) {
+                    self::PROVIDER_ANTHROPIC => $this->make_api_call_anthropic($payload),
+                    self::PROVIDER_GEMINI    => $this->make_api_call_gemini($payload),
+                    self::PROVIDER_OPENAI    => $this->make_api_call_openai($payload),
+                    default                  => ['error' => "Unknown synthesis provider: {$synthesis_provider}"],
+                };
+            } finally {
+                $this->model    = $original_model;
+                $this->api_key  = $original_api_key;
+                $this->provider = $original_provider;
+            }
         }
 
         if (!empty($raw['error'])) {
@@ -722,6 +1114,62 @@ class AI {
         $output_tokens = (int) ($usage['output_tokens'] ?? 0);
         $cache_create  = (int) ($usage['cache_creation_input_tokens'] ?? 0);
         $cache_read    = (int) ($usage['cache_read_input_tokens']     ?? 0);
+
+        // v4.42.10+: detect truncation by max_tokens limit.
+        // v4.42.11+: always log stop_reason and output_tokens, not just
+        //            the max_tokens case. Helps diagnose truncation
+        //            scenarios where the answer cuts off mid-sentence
+        //            but stop_reason is end_turn or something else
+        //            (i.e., the model stopped of its own accord rather
+        //            than hitting the budget). The probation-answer
+        //            case in v4.42.10 testing showed exactly this —
+        //            answer ended mid-sentence with output well under
+        //            the configured max_tokens=950 budget, suggesting
+        //            the truncation is NOT a budget problem. Need data
+        //            on actual stop_reason to know where to dig.
+        //
+        // When the model hits the configured max_tokens ceiling mid-
+        // generation, Anthropic returns the partial answer with
+        // stop_reason='max_tokens' (vs 'end_turn' for a complete answer).
+        // Previously this was silent — the partial answer was rendered
+        // to the user as if complete, often ending mid-sentence. Gemini
+        // already had equivalent detection (MAX_TOKENS in finishReason);
+        // OpenAI similarly via finish_reason='length'. This brings the
+        // Anthropic path to parity.
+        //
+        // We don't auto-retry with a larger budget here — that's a
+        // future improvement. For now: log loudly so the operator can
+        // raise the max_tokens setting if truncation is happening on
+        // legitimate complex answers.
+        $stop_reason = (string) ($raw['stop_reason'] ?? 'unknown');
+        $answer_tail = substr($answer, -120);
+        $tail_looks_truncated = $this->tail_looks_truncated($answer);
+
+        if ($stop_reason === 'max_tokens') {
+            $this->logger->warning('Anthropic response truncated by max_tokens', [
+                'model'          => $this->synthesis_model,
+                'max_tokens'     => $this->max_tokens,
+                'output_tokens'  => $output_tokens,
+                'answer_length'  => strlen($answer),
+                'answer_tail'    => $answer_tail,
+                'hint'           => 'Raise the Max Tokens setting in Network Admin → AI Settings. Current value too low for this answer type.',
+            ]);
+        } elseif ($tail_looks_truncated) {
+            // Answer appears truncated (no terminal punctuation) but
+            // stop_reason is not max_tokens — so the model decided to
+            // stop, an internal error truncated the stream, or some
+            // other less-obvious cause. Log loudly with the stop_reason
+            // value so we can investigate.
+            $this->logger->warning('Anthropic response appears truncated mid-sentence (non-budget cause)', [
+                'model'           => $this->synthesis_model,
+                'max_tokens'      => $this->max_tokens,
+                'output_tokens'   => $output_tokens,
+                'stop_reason'     => $stop_reason,
+                'answer_length'   => strlen($answer),
+                'answer_tail'     => $answer_tail,
+                'hint'            => 'stop_reason was not max_tokens — investigate API response. Possible causes: model stop sequence, internal error, content filter.',
+            ]);
+        }
 
         $cost = $this->calculate_cost_with_cache(
             $input_tokens,
@@ -748,6 +1196,13 @@ class AI {
             'cost'          => $cost,
         ]);
 
+        // NOTE: $answer is returned as the raw model output. Markdown-to-HTML
+        // conversion happens at the caller (try_ai_fallback) AFTER the
+        // AI Inspector has captured the raw output. Keeping conversion
+        // out of this method preserves the inspector's view of exactly
+        // what the model produced, which is what the inspector exists
+        // to show. See public/class-public.php for the conversion call.
+
         return [
             'answer'        => $answer,
             'tokens_input'  => $input_tokens,
@@ -763,6 +1218,37 @@ class AI {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Heuristic check: does this answer text look like it was cut off
+     * mid-sentence? Used to detect truncation that isn't explained by
+     * max_tokens (which would be caught by stop_reason='max_tokens').
+     *
+     * A "completed" answer typically ends with terminal punctuation
+     * (. ! ? or :) — possibly followed by a closing quote, parenthesis,
+     * or markdown formatting marker. An answer ending in a noun phrase,
+     * a comma, a dangling preposition, or a word without punctuation is
+     * almost certainly truncated.
+     *
+     * This is a heuristic, not a proof — it can false-positive on
+     * single-line answers ending in URLs or special formatting. But the
+     * false-positive rate is acceptable as a diagnostic trigger; the
+     * log entry just gives operators a starting point for investigation.
+     *
+     * @since 4.42.11
+     */
+    private function tail_looks_truncated(string $answer): bool {
+        $trimmed = rtrim($answer);
+        if ($trimmed === '') return false;
+        // Strip closing markdown/quotation chars that legitimately follow
+        // terminal punctuation: ) ] " ' ` * _ —
+        $stripped = rtrim($trimmed, ")]\"'`*_—–-");
+        if ($stripped === '') return false;
+        $last = mb_substr($stripped, -1);
+        // Terminal punctuation marks that indicate a complete sentence.
+        $terminals = ['.', '!', '?', ':'];
+        return !in_array($last, $terminals, true);
+    }
 
     /**
      * Build the system prompt as two parts: a STABLE prefix (persona + rules,
@@ -880,9 +1366,19 @@ DON'T:
 The tone should feel helpful and relatable while still being accurate and trustworthy.
 
 CRITICAL FORMATTING RULES:
-- Be concise. Most answers should be 1-3 sentences maximum.
+- Default to short conversational prose (typically 1-3 sentences).
 - Write in plain, direct sentences. No padding, no preamble like "Great question!" or "I can help with that!".
-- Do NOT use bullet points, dashes, numbered lists, or headers.
+- Use light structural formatting (compact bullets or a brief heading) ONLY when the answer includes one or more of:
+    - three or more procedural steps
+    - conditional eligibility cases
+    - multiple exceptions
+    - comparisons between pathways or policies
+- Do NOT use formatting for:
+    - simple factual answers
+    - contact information
+    - single-step procedures
+    - short clarifications
+- Prefer the simplest format that preserves clarity. When in doubt, use prose.
 - You MAY use **bold** to highlight the most important details — office name, phone number, email, location. Use sparingly, only on key facts.
 - If a URL or link exists in the context, include it as a plain URL (e.g. http://example.com). Do not use markdown link format like [text](url). Do not strip or omit URLs.
 - Do NOT use lead-ins like "Here's what you should do:" — just give the answer.
@@ -925,18 +1421,22 @@ Do not infer, guess, or generate plausible-looking specifics based on
 what such information typically looks like at a university. A wrong
 phone number causes more harm than no phone number.
 
-PRIMARY PRINCIPLE — RESOLUTION OVER CLARIFICATION:
-Your primary goal is to help the user complete their task by providing a direct answer or a referral to the right office. Resolution is always preferred to clarification.
-- ALWAYS attempt to resolve the question before asking anything back.
-- A direct but partial answer is ALWAYS preferred over a question.
-- If a reasonable institutional interpretation exists, provide the answer immediately. Do NOT ask the user to rephrase. Do NOT reflect the question back. Do NOT request additional context.
+RESOLUTION-FIRST RULE:
+Always provide the best actionable answer FIRST, using the conversation history and context.
 
-NO CLARIFICATION LOOPS:
-Once you have provided either a valid answer OR a valid institutional referral, the response is complete.
-- Do NOT ask follow-up clarifying questions afterward.
-- Do NOT reopen interpretation after a response is given.
-- Do NOT second-guess yourself in the same response.
-(A grounded engagement-driving follow-up — see FOLLOW-UP SUGGESTION RULE — is allowed and is different from a clarification request.)
+If the topic is plausibly in-domain, the answer must contain real content — actual steps, real referrals, or a direct fact — before any clarifying question is asked.
+
+If missing user-specific information (term, session, status, residency, eligibility) would let you give a more precise answer, you MAY add ONE short clarifying question AFTER the general answer. Never withhold a useful answer just to ask a question.
+
+NEVER:
+- Reflect the question back ("How would you like me to help you...?")
+- Ask the user to rephrase
+- Ask which topic they mean if it was already established in the conversation
+- Open with a clarifying question before any substantive answer
+- Ask more than one question in a single response
+- Continue asking new clarifying questions across multiple turns of a single conversation
+
+Once a substantive answer has been delivered, the response is complete. Do NOT reopen interpretation, second-guess yourself, or pivot to related topics in the same turn. (A grounded, context-supported engagement follow-up — see FOLLOW-UP SUGGESTION RULE — is allowed and is different from a clarification request.)
 
 CONCEPT MAPPING — bridge non-standard phrasing to known concepts when meaning is clear:
 If the user uses non-standard terminology that maps clearly to an institutional concept in context, use the institutional concept.
@@ -976,29 +1476,11 @@ GENERAL PRINCIPLE:
 - Do not introduce concepts or distinctions (e.g. "drop vs. withdrawal", "active vs. inactive status") unless they appear in the context. Stay within the vocabulary the context uses.
 - When CASE 1 fires and you're bridging non-standard terminology, use ONLY the procedural details from context. Do NOT supplement with general knowledge about what such documents are typically used for.
 
-CLARIFY-ONCE RULE (DEPENDENCY-BASED):
-Ask exactly ONE clarifying question ONLY when all of the following are true:
-1. The answer could meaningfully change based on missing user-specific information
-2. That missing information is not already provided in the conversation
-3. A correct general answer would differ materially from a precise answer
-
-Examples: eligibility, residency status, term/session, program type, enrollment type, or policy variation by context.
-
-WHEN TRIGGERED:
-- Provide the best general answer first
-- Then ask exactly ONE clarifying question targeting the single most important missing variable
-
-WHEN NOT TRIGGERED (IMPORTANT):
-- Do NOT ask any clarifying question
-- Do NOT pivot to related topics
-- Do NOT add curiosity prompts (e.g., "Curious about X?", "Would you like to know about Y?")
-- Do NOT introduce additional informational expansions not required to answer the question
-- Simply answer the question directly and stop
-
-FOLLOW-UP QUESTION CONSTRAINT (SUBORDINATE TO CLARIFY-ONCE):
-- Do not add conversational or engagement questions.
-- If CLARIFY-ONCE triggers a question, ensure it is strictly task-relevant and singular.
-- Do not introduce any additional question types beyond CLARIFY-ONCE logic.
+CLARIFYING-QUESTION SCOPE:
+- Any clarifying question must come AFTER a substantive answer, per the RESOLUTION-FIRST RULE above.
+- Only valid trigger: missing user-specific information (term, session, status, residency, eligibility) that would materially change a precise answer.
+- Never used for: pivoting to related topics, curiosity prompts ("Curious about X?", "Would you like to know about Y?"), or informational expansions beyond the question asked.
+- Maximum one question per response, ever.
 
 HUMAN-HANDOFF RULE (use when relevant):
 - For sensitive or case-specific situations — residency disputes, transcript evaluation specifics, admissions appeals, visa/legal complexities, account login issues, accommodations requiring documentation review — recommend speaking with the appropriate office directly rather than answering with general guidance.
@@ -1085,34 +1567,49 @@ PROMPT;
             $stable_prefix .= <<<PROMPT
 
 FOLLOW-UP SUGGESTION RULE (applies to CASE 1 only):
-PLACEMENT
-- After the main answer (including any contact info if the CONTACT INFORMATION RULE included some), add a BLANK LINE followed by ONE follow-up question as a separate paragraph.
+
+Use follow-up questions sparingly. A missing follow-up is invisible. A follow-up that leads to "I don't have that information" damages user trust. When in doubt, omit.
+
+Only offer a follow-up if the answer to that follow-up is substantially supported by information already visible in the current CONTEXT block.
+
+PRE-FLIGHT CHECK (apply before offering any follow-up):
+Ask yourself: "If the user replies 'yes', could I answer that follow-up immediately and specifically using ONLY the current CONTEXT?"
+
+Only offer the follow-up if the answer is YES.
+
+DO NOT offer follow-ups that:
+- depend on future retrieval not yet visible
+- narrow into details not explicitly present in CONTEXT
+- would likely result in uncertainty, referral, or "I don't have that information"
+- depend on inferred or general knowledge rather than CONTEXT content
+- are a paraphrase or rewording of the main answer
+
+PLACEMENT (only if all the above conditions are satisfied):
+- After the main answer (including any contact info from the CONTACT INFORMATION RULE), add a BLANK LINE followed by ONE follow-up question as a separate paragraph.
 - Format: a short conversational invitation, e.g. "Want to know the late registration fee deadline?"
 - Keep it under 12 words, one sentence only.
 - DO NOT add a follow-up to CASE 2 responses (deflections / out-of-scope refusals).
-
-GROUNDING — only suggest a follow-up if ALL conditions are met:
-1. The follow-up topic is explicitly present in the retrieved context.
-2. The topic was NOT already fully covered in the answer.
-3. The follow-up produces a meaningfully distinct answer (not a paraphrase or rewording of the answer).
-4. The follow-up is directly supported by explicit context content (not inferred, assumed, or generalized from prior knowledge).
-5. The follow-up references a specific detail from context (e.g., deadline, fee amount, location, requirement, or process step), not a general topic area.
-
-If ANY condition is not met, DO NOT suggest a follow-up.
-
-A missing follow-up is invisible. A wrong follow-up creates a dead-end conversation. When in doubt, omit.
 
 EXAMPLES
 ✓ GOOD (allowed)
   Context: tuition info + late registration fee deadline is provided
   Answer: explains tuition costs
   Follow-up: "Want to know the late registration fee deadline?"
-  → grounded, specific detail, not already covered
+  → grounded, specific detail, not already covered, pre-flight passes
+  (you can write a real answer about the deadline from CONTEXT)
 
 ✗ BAD (too general / speculative)
   Context: tutoring services info only
   Follow-up: "Want to know what courses have tutors?"
   → speculative; context does not enumerate courses
+  (pre-flight fails — you'd have to bail to "I don't have that info")
+
+✗ BAD (topic mentioned but not detailed)
+  Context: application overview that mentions scholarships exist but no specific scholarship details
+  Answer: explains the application process
+  Follow-up: "Want to know more about scholarship deadlines?"
+  → BAD — "scholarships" is in CONTEXT but specific deadlines are not.
+  Pre-flight fails because answering would require information beyond CONTEXT.
 
 ✗ BAD (rephrase)
   Context: good standing defined as GPA ≥ 2.0
@@ -1260,6 +1757,9 @@ PROMPT;
         if ($this->provider === self::PROVIDER_GEMINI) {
             return $this->make_api_call_gemini($payload);
         }
+        if ($this->provider === self::PROVIDER_OPENAI) {
+            return $this->make_api_call_openai($payload);
+        }
         return $this->make_api_call_anthropic($payload);
     }
 
@@ -1336,12 +1836,41 @@ PROMPT;
             return ['error' => $response->get_error_message()];
         }
 
-        $code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $code     = wp_remote_retrieve_response_code($response);
+        $raw_body = (string) wp_remote_retrieve_body($response);
+        $body     = json_decode($raw_body, true);
 
         if ($code !== 200) {
-            $msg = $body['error']['message'] ?? "Gemini API returned HTTP {$code}";
-            return ['error' => $msg];
+            // v4.41.5.4+: capture HTTP code AND raw body in the log so
+            // operators can diagnose Gemini errors without shell access.
+            // Google's error format varies (code/message/status/details
+            // vs plain text vs HTML), so we include the raw body
+            // truncated to 500 chars rather than relying on the parsed
+            // shape. The api_key is in the URL, so we mask it before
+            // logging for safety.
+            $masked_url = preg_replace('/key=[^&]+/', 'key=***MASKED***', $url);
+            $body_excerpt = mb_strimwidth($raw_body, 0, 500, '…');
+            $this->logger->error('Gemini API non-200 response', [
+                'http_code'   => $code,
+                'url'         => $masked_url,
+                'raw_body'    => $body_excerpt,
+                'parsed_msg'  => $body['error']['message'] ?? null,
+                'parsed_code' => $body['error']['code']    ?? null,
+                'parsed_status' => $body['error']['status'] ?? null,
+                'model'       => $this->model,
+            ]);
+            $msg = $body['error']['message']
+                ?? "Gemini API returned HTTP {$code}"
+                . ($raw_body !== '' ? ' — ' . mb_strimwidth($raw_body, 0, 200, '…') : '');
+            // v4.41.5.4+: include http_code and raw_body_excerpt in the
+            // structured error return so test_synthesis() (and any
+            // future diagnostic UI) can surface them. Plain callers
+            // that just check $result['error'] keep working unchanged.
+            return [
+                'error'            => $msg,
+                'http_code'        => (int) $code,
+                'raw_body_excerpt' => $body_excerpt,
+            ];
         }
 
         return $this->translate_response_from_gemini($body);
@@ -1529,6 +2058,195 @@ PROMPT;
         ];
     }
 
+    /**
+     * OpenAI Chat Completions API call.
+     *
+     * Translates the Anthropic-shaped payload to OpenAI's request format,
+     * posts to OpenAI's endpoint with Bearer auth, then translates the
+     * response back into the Anthropic content-block shape so upstream
+     * callers receive the same structure regardless of provider.
+     *
+     * @since 4.42.2
+     */
+    private function make_api_call_openai(array $payload): array {
+        $openai_payload = $this->translate_payload_to_openai($payload);
+
+        $response = wp_remote_post(self::OPENAI_API_BASE, [
+            'timeout'     => 30,
+            'headers'     => [
+                'Content-Type'  => 'application/json',
+                'Authorization' => 'Bearer ' . $this->api_key,
+            ],
+            'body'        => wp_json_encode($openai_payload),
+            'data_format' => 'body',
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['error' => $response->get_error_message()];
+        }
+
+        $code     = wp_remote_retrieve_response_code($response);
+        $raw_body = (string) wp_remote_retrieve_body($response);
+        $body     = json_decode($raw_body, true);
+
+        if ($code !== 200) {
+            // OpenAI's error format is consistent: {error: {message, type, code}}.
+            // Log raw body for diagnostic visibility, mirrored on the
+            // Gemini error handling.
+            $body_excerpt = mb_strimwidth($raw_body, 0, 500, '…');
+            $this->logger->error('OpenAI API non-200 response', [
+                'http_code'   => $code,
+                'raw_body'    => $body_excerpt,
+                'parsed_msg'  => $body['error']['message'] ?? null,
+                'parsed_type' => $body['error']['type']    ?? null,
+                'parsed_code' => $body['error']['code']    ?? null,
+                'model'       => $this->model,
+            ]);
+            $msg = $body['error']['message']
+                ?? "OpenAI API returned HTTP {$code}"
+                . ($raw_body !== '' ? ' — ' . mb_strimwidth($raw_body, 0, 200, '…') : '');
+            return [
+                'error'            => $msg,
+                'http_code'        => (int) $code,
+                'raw_body_excerpt' => $body_excerpt,
+            ];
+        }
+
+        return $this->translate_response_from_openai($body);
+    }
+
+    /**
+     * Convert an Anthropic-shaped payload to OpenAI Chat Completions format.
+     *
+     * Anthropic shape:
+     *   {model, max_tokens, system?, messages: [{role, content}],
+     *    temperature?, ...}
+     *
+     * OpenAI shape:
+     *   {model, max_tokens, messages: [{role, content}], temperature?, ...}
+     *
+     * Key differences:
+     *   - OpenAI's system message is a regular message with role:'system',
+     *     not a top-level field. We prepend the system message to the
+     *     messages array.
+     *   - Anthropic's `system` can be a string OR an array of cache_control
+     *     blocks. We flatten to a string (concatenating block texts).
+     *     OpenAI doesn't honor cache_control hints — caching happens
+     *     automatically on the OpenAI side above a token threshold.
+     *   - Content can be a string or array of blocks; OpenAI accepts
+     *     either, but for parity we send a plain string per message.
+     */
+    private function translate_payload_to_openai(array $payload): array {
+        $openai = [
+            'model' => $payload['model'] ?? $this->model,
+        ];
+
+        // v4.42.7+: GPT-5 family models REJECT max_tokens and require
+        // max_completion_tokens instead. OpenAI returns HTTP 400 with
+        // "Unsupported parameter: 'max_tokens' is not supported with
+        // this model" if you send max_tokens to gpt-5*. Older models
+        // (gpt-4o, gpt-4o-mini) accept both but max_tokens is canonical.
+        //
+        // Strategy: detect gpt-5 family by model-name prefix and emit
+        // max_completion_tokens for those; keep max_tokens for everything
+        // else. Done by name-prefix rather than a hardcoded list so
+        // future gpt-5 variants (gpt-5.5, gpt-5.4-nano, etc.) work
+        // without code changes.
+        $model_name = (string) ($openai['model'] ?? '');
+        $is_gpt5_family = (strpos($model_name, 'gpt-5') === 0);
+        if (isset($payload['max_tokens'])) {
+            $token_key = $is_gpt5_family ? 'max_completion_tokens' : 'max_tokens';
+            $openai[$token_key] = (int) $payload['max_tokens'];
+        }
+        if (isset($payload['temperature'])) {
+            $openai['temperature'] = (float) $payload['temperature'];
+        }
+
+        // Translate system + messages into one flat messages array.
+        $messages = [];
+        if (isset($payload['system'])) {
+            $system = $payload['system'];
+            $system_text = '';
+            if (is_string($system)) {
+                $system_text = $system;
+            } elseif (is_array($system)) {
+                // Flatten cache_control blocks to plain text.
+                foreach ($system as $block) {
+                    if (is_array($block) && isset($block['text'])) {
+                        $system_text .= (string) $block['text'];
+                    } elseif (is_string($block)) {
+                        $system_text .= $block;
+                    }
+                }
+            }
+            if ($system_text !== '') {
+                $messages[] = ['role' => 'system', 'content' => $system_text];
+            }
+        }
+        if (isset($payload['messages']) && is_array($payload['messages'])) {
+            foreach ($payload['messages'] as $m) {
+                $role = (string) ($m['role'] ?? 'user');
+                $content = $m['content'] ?? '';
+                if (is_array($content)) {
+                    // Flatten content blocks to text.
+                    $text = '';
+                    foreach ($content as $block) {
+                        if (is_array($block) && isset($block['text'])) {
+                            $text .= (string) $block['text'];
+                        } elseif (is_string($block)) {
+                            $text .= $block;
+                        }
+                    }
+                    $content = $text;
+                }
+                $messages[] = ['role' => $role, 'content' => (string) $content];
+            }
+        }
+        $openai['messages'] = $messages;
+
+        return $openai;
+    }
+
+    /**
+     * Translate an OpenAI Chat Completions response into Anthropic's
+     * content-block shape so upstream callers don't need to branch on
+     * provider.
+     *
+     * OpenAI response shape:
+     *   {id, choices: [{message: {role, content}, finish_reason}],
+     *    usage: {prompt_tokens, completion_tokens, total_tokens,
+     *            prompt_tokens_details: {cached_tokens}}}
+     *
+     * @since 4.42.2
+     */
+    private function translate_response_from_openai(array $body): array {
+        $text = (string) ($body['choices'][0]['message']['content'] ?? '');
+        $usage = $body['usage'] ?? [];
+        $input_tokens  = (int) ($usage['prompt_tokens']     ?? 0);
+        $output_tokens = (int) ($usage['completion_tokens'] ?? 0);
+        // OpenAI prompt caching surfaces cached tokens here when the
+        // prompt exceeds 1024 tokens. Cached tokens are billed at half
+        // rate; for the small synthesis prompts in CleverSay they're
+        // usually zero. We expose them as cache_read_input_tokens to
+        // align with Anthropic's shape, even though OpenAI's pricing
+        // for cached vs non-cached doesn't match Anthropic's tiers.
+        $cache_read = (int) ($usage['prompt_tokens_details']['cached_tokens'] ?? 0);
+
+        return [
+            'content' => [[
+                'type' => 'text',
+                'text' => $text,
+            ]],
+            'usage' => [
+                'input_tokens'                => $input_tokens,
+                'output_tokens'               => $output_tokens,
+                'cache_read_input_tokens'     => $cache_read,
+                'cache_creation_input_tokens' => 0,
+            ],
+            '_provider' => self::PROVIDER_OPENAI,
+        ];
+    }
+
     private function calculate_cost(int $input_tokens, int $output_tokens): float {
         $rates = self::PRICING[$this->model] ?? self::PRICING['claude-haiku-4-5-20251001'];
         return round(
@@ -1703,6 +2421,12 @@ PROMPT;
             'gemini-3.1-flash-lite-preview' => 'Gemini 3.1 Flash-Lite — Cheapest ($0.25/$1.50 per MTok)',
             'gemini-3-flash-preview'        => 'Gemini 3 Flash — Fast &amp; balanced ($0.50/$3 per MTok)',
             'gemini-2.5-flash'              => 'Gemini 2.5 Flash — Stable ($0.30/$2.50 per MTok)',
+
+            // OpenAI (v4.42.2+, evaluation candidate).
+            'gpt-4o-mini'                   => 'GPT-4o mini — OpenAI budget tier ($0.15/$0.60 per MTok)',
+            // v4.42.5+: newer-gen successor at the Sonnet-equivalent tier
+            // but ~4x cheaper than Sonnet 4.6. 400k context window.
+            'gpt-5.4-mini'                  => 'GPT-5.4 mini — OpenAI Sonnet-tier alternative ($0.75/$4.50 per MTok)',
         ];
     }
 
@@ -1723,6 +2447,157 @@ PROMPT;
      */
     public function get_model(): string {
         return $this->model;
+    }
+
+    /**
+     * Return the model used for chat-answer synthesis (answer_with_context).
+     * Distinct from get_model() — synthesis_model is configured separately
+     * and may be a different (typically larger) model than the default.
+     *
+     * @since 4.41.5.3
+     */
+    public function get_synthesis_model(): string {
+        return $this->synthesis_model;
+    }
+
+    /**
+     * Return the model used for KB polish (polish_kb_response).
+     * Distinct from get_model() — polish_model is configured separately
+     * and may differ from the default model (typically smaller/cheaper,
+     * since polish is a constrained transformation).
+     *
+     * @since 4.42.1
+     */
+    public function get_polish_model(): string {
+        return $this->polish_model;
+    }
+
+    /**
+     * v4.41.5.4+: One-shot diagnostic call against the currently-configured
+     * synthesis_model. Used by the "Test Synthesis Model" button on the
+     * Network Admin → CleverSay → AI Settings page so operators without
+     * shell access can verify the API + key + model combination is
+     * working before committing to it as the live synthesis path.
+     *
+     * Sends a tiny prompt ("Reply with the single word: pong") with no
+     * KB context and a 50-token cap. Returns a structured result with
+     * everything an operator (or another Claude session) needs to
+     * diagnose a failure: HTTP code, provider, model id, masked URL,
+     * raw response body (truncated), latency, and the parsed answer
+     * if any. Never throws — failures are returned as data.
+     *
+     * @return array {
+     *   success: bool,
+     *   provider: string,
+     *   model: string,
+     *   http_code: int|null,
+     *   answer: string,
+     *   error: string|null,
+     *   latency_ms: int,
+     *   raw_body_excerpt: string|null
+     * }
+     */
+    public function test_synthesis(): array {
+        $start = microtime(true);
+        $result = [
+            'success'          => false,
+            'provider'         => $this->provider,
+            'model'            => $this->synthesis_model,
+            'synthesis_provider' => self::PRICING[$this->synthesis_model]['provider'] ?? 'unknown',
+            'http_code'        => null,
+            'answer'           => '',
+            'error'            => null,
+            'latency_ms'       => 0,
+            'raw_body_excerpt' => null,
+        ];
+
+        if (!$this->is_configured()) {
+            $result['error']      = 'AI is not configured (no API key for the selected model\'s provider).';
+            $result['latency_ms'] = (int) round((microtime(true) - $start) * 1000);
+            return $result;
+        }
+
+        // Run the test against synthesis_model specifically, even if the
+        // default model differs. We do this by temporarily routing
+        // through the synthesis path's provider — same logic as
+        // answer_with_context's provider-mismatch handling.
+        $payload = [
+            'model'      => $this->synthesis_model,
+            'max_tokens' => 50,
+            'system'     => 'You are a test responder. Reply with exactly: pong',
+            'messages'   => [
+                ['role' => 'user', 'content' => 'Test ping.'],
+            ],
+            'temperature' => 0.0,
+        ];
+
+        try {
+            $synthesis_provider = self::PRICING[$this->synthesis_model]['provider'] ?? self::PROVIDER_ANTHROPIC;
+            if ($synthesis_provider === self::PROVIDER_GEMINI) {
+                // Force the Gemini path. We need to swap $this->model
+                // briefly because make_api_call_gemini reads $this->model
+                // when constructing the URL. Reset on exit.
+                $original_model    = $this->model;
+                $original_api_key  = $this->api_key;
+                $original_provider = $this->provider;
+                $this->model       = $this->synthesis_model;
+                $this->provider    = self::PROVIDER_GEMINI;
+                // Resolve the Gemini-specific key. Read directly from the
+                // network config so we don't depend on $this->api_key
+                // having been initialized for the right provider.
+                $cfg               = NetworkSettings::get_ai();
+                $this->api_key     = (string) ($cfg['gemini_api_key'] ?? '');
+                try {
+                    $raw = $this->make_api_call_gemini($payload);
+                } finally {
+                    $this->model    = $original_model;
+                    $this->api_key  = $original_api_key;
+                    $this->provider = $original_provider;
+                }
+            } else {
+                // Anthropic path. answer_with_context's "provider differs"
+                // branch routes through call_validator_api which already
+                // resolves the Anthropic key independent of the active
+                // provider. We can call make_api_call directly when the
+                // synthesis provider matches the current provider, OR
+                // call_validator_api otherwise.
+                if ($this->provider === self::PROVIDER_ANTHROPIC) {
+                    $raw = $this->make_api_call($payload);
+                } else {
+                    $raw = $this->call_validator_api($payload);
+                }
+            }
+
+            if (!empty($raw['error'])) {
+                $result['error'] = (string) $raw['error'];
+                // v4.41.5.4+: surface diagnostic fields when the call
+                // path provides them (currently only Gemini's error
+                // path; Anthropic could be added similarly later).
+                if (isset($raw['http_code'])) {
+                    $result['http_code'] = (int) $raw['http_code'];
+                }
+                if (isset($raw['raw_body_excerpt'])) {
+                    $result['raw_body_excerpt'] = (string) $raw['raw_body_excerpt'];
+                }
+            } else {
+                $answer_text = '';
+                if (isset($raw['content'][0]['text'])) {
+                    $answer_text = (string) $raw['content'][0]['text'];
+                }
+                $result['answer']  = trim($answer_text);
+                $result['success'] = $result['answer'] !== '';
+                if (!$result['success']) {
+                    $result['error'] = 'API returned a 200 but the response had no text content.';
+                }
+                // 200 OK — record http_code for completeness.
+                $result['http_code'] = 200;
+            }
+        } catch (\Throwable $e) {
+            $result['error'] = 'Exception during test: ' . $e->getMessage();
+        }
+
+        $result['latency_ms'] = (int) round((microtime(true) - $start) * 1000);
+        return $result;
     }
 
     private function error_response(string $message): array {

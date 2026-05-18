@@ -42,6 +42,22 @@ class Database {
     public string $source_usage;
     public string $leads;
     public string $embedding_queue;
+    /**
+     * v4.41.5+: per-request latency metrics. One row per AJAX search
+     * request that produced a logged question. See class-request-timer.php
+     * for the writer side and the latency dashboard view for the reader.
+     */
+    public string $request_metrics;
+    /**
+     * v4.42.0+: bulk question testing infrastructure. Used during
+     * pre-deployment qualification — operator uploads a CSV of historical
+     * + speculative student questions, the runner processes them through
+     * the same path as live traffic (search → AI fallback → synthesis),
+     * and dumps results for offline review. NOT for ongoing regression
+     * testing; that's a separate concern. See class-bulk-tester.php.
+     */
+    public string $bulk_test_runs;
+    public string $bulk_test_results;
     
     /**
      * Constructor
@@ -69,6 +85,12 @@ class Database {
         // v4.39.0+: queue for chunks awaiting embedding generation.
         // See ARCHITECTURE.md → Phase 2 of the embeddings migration.
         $this->embedding_queue = $wpdb->prefix . 'cleversay_embedding_queue';
+        // v4.41.5+: per-request latency metrics. One row per AJAX search
+        // that produced a logged question, FK'd to cleversay_questions.id.
+        $this->request_metrics = $wpdb->prefix . 'cleversay_request_metrics';
+        // v4.42.0+: bulk question testing — CSV-driven qualification runs.
+        $this->bulk_test_runs    = $wpdb->prefix . 'cleversay_bulk_test_runs';
+        $this->bulk_test_results = $wpdb->prefix . 'cleversay_bulk_test_results';
     }
     
     /**
@@ -504,6 +526,98 @@ class Database {
             INDEX idx_blog_status (blog_id, status)
         ) $charset_collate;";
 
+        // v4.41.5+: per-request latency metrics. One row per AJAX search
+        // that produced a logged question. RequestTimer writes the row
+        // from the shutdown handler. The latency dashboard reads from
+        // here for the headline numbers and recent-queries table.
+        //
+        // FK to cleversay_questions.id is logical (not a real FOREIGN
+        // KEY constraint) — WordPress conventionally uses logical FKs
+        // since not all storage engines support them, and orphan rows
+        // are tolerated. The 90-day prune cron (in class-metrics-pruner)
+        // keeps the table small without referential constraints.
+        //
+        // matched_layer enum is explicit so analytics queries can ask
+        // "what fraction of requests went all the way through synthesis"
+        // without deriving it from flag combinations.
+        //
+        // Indexes: question_id for "find metrics for this question",
+        // created_at for time-range queries (last 24h),
+        // total_ms for "find slowest queries" without scanning.
+        $sql_request_metrics = "CREATE TABLE {$this->request_metrics} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            question_id BIGINT(20) UNSIGNED NOT NULL,
+            total_ms INT(11) NOT NULL,
+            kb_ms INT(11) NOT NULL,
+            retrieval_ms INT(11) DEFAULT NULL,
+            synthesis_ms INT(11) DEFAULT NULL,
+            render_ms INT(11) NOT NULL,
+            ai_fallback_fired TINYINT(1) NOT NULL DEFAULT 0,
+            cache_hit TINYINT(1) NOT NULL DEFAULT 0,
+            gate_fired TINYINT(1) DEFAULT NULL,
+            matched_layer ENUM('kb_strong','kb_weak_with_ai','ai_only','no_answer') NOT NULL DEFAULT 'no_answer',
+            tokens_in INT(11) DEFAULT NULL,
+            tokens_out INT(11) DEFAULT NULL,
+            cost DECIMAL(10,6) DEFAULT NULL,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_question (question_id),
+            INDEX idx_created (created_at),
+            INDEX idx_total_ms (total_ms)
+        ) $charset_collate;";
+
+        // v4.42.0+: bulk testing tables. One run = one CSV import/execute
+        // session. One result row per question in that run. Persisted so
+        // operators can compare runs over time and re-download the result
+        // CSV without re-running. Two-table design (runs + results) so we
+        // can show run-level metadata (status, timings, summary) without
+        // joining/aggregating every results row each time.
+        $sql_bulk_test_runs = "CREATE TABLE {$this->bulk_test_runs} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            label VARCHAR(255) DEFAULT NULL,
+            status ENUM('pending','running','completed','failed','aborted') NOT NULL DEFAULT 'pending',
+            total_questions INT(11) NOT NULL DEFAULT 0,
+            completed_questions INT(11) NOT NULL DEFAULT 0,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            total_cost DECIMAL(10,6) DEFAULT 0.000000,
+            started_at DATETIME DEFAULT NULL,
+            finished_at DATETIME DEFAULT NULL,
+            created_by BIGINT(20) UNSIGNED DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_status (status),
+            INDEX idx_created (created_at)
+        ) $charset_collate;";
+
+        $sql_bulk_test_results = "CREATE TABLE {$this->bulk_test_results} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            run_id BIGINT(20) UNSIGNED NOT NULL,
+            row_index INT(11) NOT NULL,
+            question TEXT NOT NULL,
+            notes TEXT DEFAULT NULL,
+            status ENUM('pending','running','done','failed') NOT NULL DEFAULT 'pending',
+            matched_layer VARCHAR(40) DEFAULT NULL,
+            ai_fallback_fired TINYINT(1) DEFAULT NULL,
+            top_vector_similarity DECIMAL(6,4) DEFAULT NULL,
+            top_vector_chunk_id BIGINT(20) UNSIGNED DEFAULT NULL,
+            top_fulltext_chunk_id BIGINT(20) UNSIGNED DEFAULT NULL,
+            returned_chunk_ids TEXT DEFAULT NULL,
+            gate_fired TINYINT(1) DEFAULT NULL,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            answer_text MEDIUMTEXT DEFAULT NULL,
+            tokens_in INT(11) DEFAULT NULL,
+            tokens_out INT(11) DEFAULT NULL,
+            cost DECIMAL(10,6) DEFAULT NULL,
+            total_ms INT(11) DEFAULT NULL,
+            error TEXT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_run (run_id),
+            INDEX idx_run_index (run_id, row_index),
+            INDEX idx_run_status (run_id, status)
+        ) $charset_collate;";
+
         // Execute table creation
         dbDelta($sql_knowledge);
         dbDelta($sql_questions);
@@ -516,6 +630,9 @@ class Database {
         dbDelta($sql_sources);
         dbDelta($sql_chunks);
         dbDelta($sql_embedding_queue);
+        dbDelta($sql_request_metrics);
+        dbDelta($sql_bulk_test_runs);
+        dbDelta($sql_bulk_test_results);
         dbDelta($sql_ai_answers);
         dbDelta($sql_ai_answer_sources);
         dbDelta($sql_conversation_ratings);
@@ -765,6 +882,146 @@ class Database {
         if ((int) $exists === 0) {
             $this->wpdb->query("ALTER TABLE {$table} ADD COLUMN polished_hash VARCHAR(40) DEFAULT NULL");
         }
+    }
+
+    /**
+     * v4.41.5+: idempotent install of the cleversay_request_metrics table
+     * for sites already activated on a previous CleverSay version.
+     *
+     * Mirrors create_tables()' inline schema for this one table. Used by
+     * the version-compare upgrade path in cleversay.php so existing
+     * tenants pick up the table on next admin load without needing to
+     * deactivate/reactivate the plugin. Safe to run repeatedly because
+     * dbDelta is idempotent.
+     */
+    public function add_request_metrics_table(): void {
+        global $wpdb;
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $charset_collate = $wpdb->get_charset_collate();
+        $sql = "CREATE TABLE {$this->request_metrics} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            question_id BIGINT(20) UNSIGNED NOT NULL,
+            total_ms INT(11) NOT NULL,
+            kb_ms INT(11) NOT NULL,
+            retrieval_ms INT(11) DEFAULT NULL,
+            synthesis_ms INT(11) DEFAULT NULL,
+            render_ms INT(11) NOT NULL,
+            ai_fallback_fired TINYINT(1) NOT NULL DEFAULT 0,
+            cache_hit TINYINT(1) NOT NULL DEFAULT 0,
+            gate_fired TINYINT(1) DEFAULT NULL,
+            matched_layer ENUM('kb_strong','kb_weak_with_ai','ai_only','no_answer') NOT NULL DEFAULT 'no_answer',
+            tokens_in INT(11) DEFAULT NULL,
+            tokens_out INT(11) DEFAULT NULL,
+            cost DECIMAL(10,6) DEFAULT NULL,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_question (question_id),
+            INDEX idx_created (created_at),
+            INDEX idx_total_ms (total_ms)
+        ) $charset_collate;";
+        dbDelta($sql);
+    }
+
+    /**
+     * v4.41.5.3+: idempotent ALTER to add synthesis_model on tenants
+     * already running v4.41.5/v4.41.5.1/v4.41.5.2. Existing rows stay
+     * NULL (we don't know what model produced them retroactively); new
+     * rows get the model recorded by RequestTimer.
+     *
+     * Safe to run repeatedly. The information_schema check avoids the
+     * "Duplicate column name" warning that ALTER TABLE without
+     * IF NOT EXISTS produces on MySQL versions older than 8.0.x.
+     */
+    public function add_synthesis_model_column(): void {
+        $table = $this->request_metrics;
+        // Skip silently if the table doesn't exist yet — a freshly
+        // upgraded tenant might hit this before add_request_metrics_table
+        // has run for them. The next admin load will run both in order.
+        $table_exists = $this->wpdb->get_var($this->wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+            $table
+        ));
+        if ((int) $table_exists === 0) {
+            return;
+        }
+        $col_exists = $this->wpdb->get_var($this->wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = %s
+               AND COLUMN_NAME = 'synthesis_model'",
+            $table
+        ));
+        if ((int) $col_exists === 0) {
+            $this->wpdb->query(
+                "ALTER TABLE {$table}
+                 ADD COLUMN synthesis_model VARCHAR(100) DEFAULT NULL
+                 AFTER cost"
+            );
+        }
+    }
+
+    /**
+     * v4.42.0+: idempotent install of the bulk testing tables for tenants
+     * already on a previous CleverSay version. Runs from the version-compare
+     * upgrade path in cleversay.php so existing tenants pick up the tables
+     * on next admin load without needing a deactivate/reactivate. dbDelta
+     * is idempotent, so re-running on a tenant that already has the tables
+     * is a no-op.
+     */
+    public function add_bulk_test_tables(): void {
+        global $wpdb;
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql_runs = "CREATE TABLE {$this->bulk_test_runs} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            label VARCHAR(255) DEFAULT NULL,
+            status ENUM('pending','running','completed','failed','aborted') NOT NULL DEFAULT 'pending',
+            total_questions INT(11) NOT NULL DEFAULT 0,
+            completed_questions INT(11) NOT NULL DEFAULT 0,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            total_cost DECIMAL(10,6) DEFAULT 0.000000,
+            started_at DATETIME DEFAULT NULL,
+            finished_at DATETIME DEFAULT NULL,
+            created_by BIGINT(20) UNSIGNED DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_status (status),
+            INDEX idx_created (created_at)
+        ) $charset_collate;";
+
+        $sql_results = "CREATE TABLE {$this->bulk_test_results} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            run_id BIGINT(20) UNSIGNED NOT NULL,
+            row_index INT(11) NOT NULL,
+            question TEXT NOT NULL,
+            notes TEXT DEFAULT NULL,
+            status ENUM('pending','running','done','failed') NOT NULL DEFAULT 'pending',
+            matched_layer VARCHAR(40) DEFAULT NULL,
+            ai_fallback_fired TINYINT(1) DEFAULT NULL,
+            top_vector_similarity DECIMAL(6,4) DEFAULT NULL,
+            top_vector_chunk_id BIGINT(20) UNSIGNED DEFAULT NULL,
+            top_fulltext_chunk_id BIGINT(20) UNSIGNED DEFAULT NULL,
+            returned_chunk_ids TEXT DEFAULT NULL,
+            gate_fired TINYINT(1) DEFAULT NULL,
+            synthesis_model VARCHAR(100) DEFAULT NULL,
+            answer_text MEDIUMTEXT DEFAULT NULL,
+            tokens_in INT(11) DEFAULT NULL,
+            tokens_out INT(11) DEFAULT NULL,
+            cost DECIMAL(10,6) DEFAULT NULL,
+            total_ms INT(11) DEFAULT NULL,
+            error TEXT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            INDEX idx_run (run_id),
+            INDEX idx_run_index (run_id, row_index),
+            INDEX idx_run_status (run_id, status)
+        ) $charset_collate;";
+
+        dbDelta($sql_runs);
+        dbDelta($sql_results);
     }
 
     /**

@@ -1245,6 +1245,11 @@ class API {
             'enableInquiry'        => !empty($options['enable_inquiry_form']),
             'requireEmail'         => !empty($options['require_email_for_inquiry']),
             'showAiBadge'          => !isset($options['show_ai_badge']) || !empty($options['show_ai_badge']),
+            // v4.41.5.8+: per-site debug toggle exposing client + server
+            // response timing below each bot message. Off by default;
+            // operator opts in on testing/staging tenants. See per-site
+            // Settings → Advanced → Debugging.
+            'showTiming'           => (bool) get_option('cleversay_show_timing', false),
             'aiLabel'              => get_option('cleversay_ai_label', __('AI-assisted answer', 'cleversay')),
             // ── Lead capture (pre-chat gate) ──────────────────────────────
             'leadCapture' => [

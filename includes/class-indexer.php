@@ -28,8 +28,16 @@ class Indexer {
     private const CHUNK_WORDS   = 350;
     /** Word overlap between adjacent chunks */
     private const OVERLAP_WORDS = 40;
-    /** Max chunks returned for context */
-    private const MAX_CHUNKS    = 6;
+    /**
+     * Max chunks returned for context.
+     *
+     * Public so other classes can use it as the canonical default for the
+     * `cleversay_ai_max_chunks` per-site option — see NetworkSettings,
+     * Admin save handler, and the per-site Embeddings page. Centralizing
+     * the default in one place keeps all four read/write sites in sync.
+     * (v4.41.1 — was private; cross-class access fataled at runtime.)
+     */
+    public const MAX_CHUNKS    = 6;
 
     public function __construct() {
         global $wpdb;
@@ -742,10 +750,17 @@ class Indexer {
     }
 
     public function extract_text(array $source, string $cached_html = ''): string {
+        // v4.42.30+: 'text' case added — TXT file uploads land in
+        // class-sources.php with source_type='text' (see add_file's
+        // extension-to-type switch). Previously this case fell through
+        // to the default branch which calls extract_url(''), producing
+        // the misleading "Could not fetch URL: A valid URL was not
+        // provided." error during indexing.
         switch ($source['source_type']) {
             case 'url':  return $this->extract_url($source['url'] ?? '', $cached_html);
             case 'pdf':  return $this->extract_pdf($source['file_path'] ?? '');
             case 'docx': return $this->extract_docx($source['file_path'] ?? '');
+            case 'text': return $this->extract_file_text($source['file_path'] ?? '');
             default:     return $this->extract_url($source['url'] ?? '', $cached_html);
         }
     }
@@ -1251,7 +1266,47 @@ class Indexer {
             throw new \RuntimeException('PDF file not found.');
         }
 
-        // Method 1: pdftotext shell command (available on some Linux hosts)
+        // v4.42.30+: Method 1 — Smalot/PdfParser. Pure-PHP PDF parser
+        // that handles compressed streams (FlateDecode/LZWDecode),
+        // font encodings, ToUnicode CMaps, and most modern PDF features.
+        // Vendored at includes/lib/Smalot/ — see that directory's
+        // license file (LGPL-3.0).
+        //
+        // Requires PHP's mbstring extension (virtually universal on
+        // WordPress hosts). If it's missing or the library throws for
+        // any other reason, we fall through to the legacy extraction
+        // methods below — same behavior as before this version.
+        $autoload = CLEVERSAY_PLUGIN_DIR . 'includes/lib/Smalot/autoload.php';
+        if (is_readable($autoload)) {
+            try {
+                require_once $autoload;
+                if (class_exists('Smalot\\PdfParser\\Parser')) {
+                    $parser = new \Smalot\PdfParser\Parser();
+                    $pdf    = $parser->parseFile($file_path);
+                    $text   = (string) $pdf->getText();
+                    if (!empty(trim($text))) {
+                        return trim($text);
+                    }
+                    // Empty result means Smalot didn't extract anything —
+                    // could be a scanned/image-only PDF, or text encoded
+                    // in a way Smalot can't handle. Fall through to the
+                    // legacy methods rather than giving up here.
+                }
+            } catch (\Throwable $e) {
+                // Library threw — could be malformed PDF, mbstring
+                // missing, encrypted file, etc. Log and continue with
+                // the legacy fallback methods. Logger may not exist
+                // (initialization order), so guard the call.
+                if (class_exists('\\CleverSay\\Logger')) {
+                    \CleverSay\Logger::instance()->warning('Smalot PDF parse failed, falling back', [
+                        'file'  => basename($file_path),
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
+
+        // Method 2: pdftotext shell command (available on some Linux hosts)
         if ($this->command_exists('pdftotext')) {
             $safe = \escapeshellarg($file_path);
             $text = function_exists('shell_exec') ? \shell_exec("pdftotext -layout {$safe} -") : null;  // @phpcs:ignore
@@ -1265,13 +1320,13 @@ class Indexer {
             throw new \RuntimeException('Could not read PDF file.');
         }
 
-        // Method 2: Improved PHP parser — handles FlateDecode compressed streams
+        // Method 3: Improved PHP parser — handles FlateDecode compressed streams
         $text = $this->extract_pdf_improved($raw);
         if (!empty(trim($text))) {
             return trim($text);
         }
 
-        // Method 3: Basic stream extraction fallback
+        // Method 4: Basic stream extraction fallback
         $text = $this->extract_pdf_streams($raw);
         if (!empty(trim($text))) {
             return trim($text);

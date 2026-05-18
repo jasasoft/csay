@@ -217,6 +217,19 @@ class PublicFacing {
         $html = preg_replace('/<span[^>]*>\s*<\/span>/i', '', $html);
         $html = preg_replace('/<p[^>]*>\s*<\/p>/i', '', $html);
 
+        // v4.42.17+: convert any markdown emphasis/link patterns that
+        // may have leaked into the stored response (from admin paste,
+        // legacy polish output, or content authored before the runtime
+        // converter existed). Without this, KB answers shipped via
+        // this path render markdown markers literally — e.g.
+        // **finaid@uwsp.edu** appears with asterisks instead of bold.
+        // The conversion is the same whitelisted set used elsewhere
+        // (**bold**, __bold__, [text](https-url)) and is idempotent,
+        // so running it here is safe even on already-clean HTML.
+        if (class_exists('\\CleverSay\\AI')) {
+            $html = \CleverSay\AI::convert_minimal_markdown_to_html($html);
+        }
+
         return trim($html);
     }
 
@@ -1049,8 +1062,70 @@ class PublicFacing {
         // just stops the rewriter from changing the query's meaning.
         $query_trimmed = trim($query);
 
-        $has_pronoun = (bool) preg_match(
-            '/\b(it|its|that|this|those|these|they|them|their|he|she|his|her)\b/i',
+        // v4.41.5.9+: per-site disable. Some tenants have content where
+        // users tend to ask self-contained questions (technical FAQ,
+        // procedural questions, anything not chatty/conversational); the
+        // rewriter creates more confusion than it solves on those sites.
+        // Default on for back-compat with existing tenants. Toggle off
+        // via Settings → AI tab → Query Rewriter checkbox.
+        if (!get_option('cleversay_ai_query_rewriter', true)) {
+            \CleverSay\Logger::instance()->info(
+                'Rewriter skipped — disabled for this site',
+                ['query' => $query]
+            );
+            return $query;
+        }
+
+        // v4.41.5.9+: literal re-ask short-circuit. If the user types
+        // exactly the same question they just typed (modulo case,
+        // whitespace, and trailing punctuation), they want the same
+        // answer they wanted before, not a "follow-up" specialization.
+        // This is cheap and 100% precise — no false positives. It
+        // covers the "user repeated themselves verbatim" case.
+        //
+        // Note: this does NOT catch paraphrased re-asks (different
+        // wording, same intent). True paraphrase detection requires
+        // semantic similarity, and the cheap heuristics (Jaccard,
+        // edit distance) have false-positive issues with real
+        // follow-ups. The honest fix for paraphrased re-asks is the
+        // LLM-decides design slated for v4.42.0; here we handle the
+        // exact-repeat case and rely on the tightened regex below
+        // to catch most relative-pronoun false positives.
+        $history_for_resame = json_decode(stripslashes($history_json), true);
+        if (is_array($history_for_resame) && !empty($history_for_resame)) {
+            for ($i = count($history_for_resame) - 1; $i >= 0; $i--) {
+                $msg = $history_for_resame[$i];
+                if (($msg['type'] ?? '') !== 'user') continue;
+                $prior_user_q = wp_strip_all_tags((string) ($msg['content'] ?? ''));
+                if ($prior_user_q === '') break;
+                $norm = static fn(string $s): string =>
+                    preg_replace('/\s+/u', ' ', trim(rtrim(mb_strtolower($s), " \t\n\r\0\x0B?.!,;:"))) ?? $s;
+                if ($norm($query_trimmed) === $norm($prior_user_q)) {
+                    \CleverSay\Logger::instance()->info(
+                        'Rewriter skipped — exact re-ask of prior question',
+                        ['query' => $query, 'prior' => $prior_user_q]
+                    );
+                    return $query;
+                }
+                break; // only check most recent user turn
+            }
+        }
+
+        // v4.41.5.9+: tightened referential-signal regex. Strong pronouns
+        // (it/its/they/them/their/he/she/his/her) almost always refer to
+        // something previously mentioned. Weak pronouns (that/this/these/
+        // those) are demonstrative AND relative — "the steps that follow"
+        // is relative ("follow" depends on "steps", not on history). The
+        // weak set fires too aggressively when used grammatically as
+        // relative pronouns in standalone questions, which is the failure
+        // mode that triggered v4.41.5.8's diagnostic session.
+        //
+        // Strong set: always counts as a signal.
+        // Weak set: only counts when paired with continuation phrasing
+        //           ("what about that"), or when the query is short and
+        //           starts with a demonstrative ("that one?", "this?").
+        $has_strong_pronoun = (bool) preg_match(
+            '/\b(it|its|they|them|their|he|she|his|her)\b/i',
             $query_trimmed
         );
 
@@ -1059,7 +1134,18 @@ class PublicFacing {
             $query_trimmed
         );
 
-        if (!$has_pronoun && !$has_continuation) {
+        // Weak demonstrative — "that/this" used as a true demonstrative
+        // (not a relative). Rough heuristic: short query (<6 words) AND
+        // starts with the demonstrative. "That one?" "What about that?"
+        // "This too?" These are clearly referential. Long queries with
+        // "that" embedded are almost always relative usage.
+        $weak_word_count    = str_word_count($query_trimmed);
+        $has_weak_referential = $weak_word_count < 6 && (bool) preg_match(
+            '/^(that|this|those|these)\b/i',
+            $query_trimmed
+        );
+
+        if (!$has_strong_pronoun && !$has_continuation && !$has_weak_referential) {
             \CleverSay\Logger::instance()->info(
                 'Rewriter skipped — no referential signal',
                 ['query' => $query]
@@ -1186,7 +1272,18 @@ class PublicFacing {
         $letters_only = preg_replace('/[^a-zA-Z]/', '', $q);
         if (strlen($letters_only) < 4) return false;
 
-        preg_match_all('/[bcdfghjklmnpqrstvwxyz]{5,}/i', $letters_only, $matches);
+        // v4.42.34+: Run the consonant-run regex against the ORIGINAL
+        // query (with spaces preserved), not the letters-only version.
+        // The previous code stripped spaces first, then scanned for
+        // 5+ consonant runs — which produced false positives whenever
+        // a word ending in consonants was followed by a word starting
+        // with consonants (e.g. "thanks bro" → "thanksbro" → run
+        // "nksbr" matches, scored 5/9 = 0.56, flagged as gibberish).
+        // The fix: scan with spaces intact so word boundaries break
+        // runs. The denominator is still letters-only count, which
+        // keeps the ratio math the same for legitimately gibberish
+        // input (e.g. "asdfghjkl" still scores 8/9 = 0.89).
+        preg_match_all('/[bcdfghjklmnpqrstvwxyz]{5,}/i', $q, $matches);
         $gibberish_chars = array_sum(array_map('strlen', $matches[0]));
 
         // v4.37.135+: 40%+ of letter chars in long consonant runs is mashing.
@@ -1221,10 +1318,13 @@ class PublicFacing {
         if (count($real_words) < 2) return false;
 
         // Gibberish detection — if more than 40% of word characters are
-        // consecutive consonants (5+), it's likely keyboard mashing
+        // consecutive consonants (5+), it's likely keyboard mashing.
+        // v4.42.34+: scan the original query (spaces intact) rather than
+        // the concatenated letters-only string, so word boundaries break
+        // runs. Same fix as is_gibberish_query — see comment there.
         $letters_only = preg_replace('/[^a-zA-Z]/', '', $q);
         if (strlen($letters_only) > 0) {
-            preg_match_all('/[bcdfghjklmnpqrstvwxyz]{5,}/i', $letters_only, $matches);
+            preg_match_all('/[bcdfghjklmnpqrstvwxyz]{5,}/i', $q, $matches);
             $gibberish_chars = array_sum(array_map('strlen', $matches[0]));
             if ($gibberish_chars / strlen($letters_only) > 0.4) return false;
         }
@@ -1321,6 +1421,219 @@ class PublicFacing {
         return $has_contact_redirect && !$has_specific_content;
     }
 
+    /**
+     * v4.42.0+: public seam for the BulkTester to invoke try_ai_fallback
+     * without reflection. NEVER called from the live ajax_search path —
+     * that uses try_ai_fallback() directly. Existence of this method is
+     * a stable contract for offline qualification tools; it should not
+     * be removed without updating BulkTester at the same time.
+     *
+     * Always passes empty history (each bulk test question is evaluated
+     * standalone, no rewriter/history context bleed between rows).
+     */
+    public function run_ai_fallback_for_test(string $question): ?string {
+        return $this->try_ai_fallback($question, '');
+    }
+
+    /**
+     * v4.42.0.2+: public seam for the BulkTester to run the full Layer 1
+     * decision tree on a matched KB entry — validator (if enabled), polish
+     * (if validator accepts and entry isn't already polished), or AI
+     * reroute (if validator rejects). Returns the answer the user would
+     * actually see, plus a `path` flag telling the caller which branch
+     * was taken so the bulk runner can record it.
+     *
+     * Mirrors the live ajax_search Layer 1 logic at ~lines 3000–3270 of
+     * this file. Kept narrowly scoped: caller has already done Layer 1
+     * matching and decided this is a strong hit; this method only handles
+     * what happens after that decision. AI reroute uses try_ai_fallback
+     * (same path as the live code's `goto ai_fallback`).
+     *
+     * v4.42.0.4+: optional $process_trace by-reference. When provided,
+     * the method pushes step entries describing what it did (validator
+     * verdict, polish run, AI reroute trigger) so the Ask Question /
+     * AI Inspector page can display the same decisions without making
+     * its own redundant validator call. Step numbers continue from the
+     * trace's current length.
+     *
+     * @param string     $question The user's original query.
+     * @param array      $first_match The matches[0] row from Search::search().
+     * @param array|null &$process_trace Optional. If passed, gets step
+     *   entries appended for each pipeline decision made.
+     * @return array{answer:string,path:string,was_validated:bool,was_polished:bool}
+     *   - path: 'kb_raw' | 'kb_polished' | 'kb_ai_rerouted'
+     */
+    public function run_layer1_pipeline_for_test(string $question, array $first_match, ?array &$process_trace = null): array {
+        $logger = Logger::instance();
+
+        $ai_config          = \CleverSay\NetworkSettings::get_ai_config();
+        $ai_ok              = \CleverSay\NetworkSettings::ai_is_configured();
+        $validate_all_kb    = $ai_ok && !empty($ai_config['validate_kb']);
+        $validate_aadefault = $ai_ok && !empty($ai_config['aadefault_validate']);
+        $is_aadefault       = strtolower($first_match['sub_keyword'] ?? '') === 'aadefault';
+        $should_validate    = $validate_all_kb || ($validate_aadefault && $is_aadefault);
+        $polish_enabled     = $ai_ok && !empty($ai_config['polish_kb']);
+
+        // Helper to push a step into the optional process trace. No-op
+        // when caller didn't pass a trace (BulkTester path).
+        $push_step = function (string $description, string $result_text, string $ai_status) use (&$process_trace): void {
+            if (!is_array($process_trace)) return;
+            $process_trace[] = [
+                'step'        => count($process_trace) + 1,
+                'description' => $description,
+                'result'      => $result_text,
+                'ai_status'   => $ai_status,
+            ];
+        };
+
+        $raw_html  = (string) ($first_match['response'] ?? '');
+        $kb_clean  = $this->clean_response_html($raw_html);
+
+        $kb_was_validated = false;
+        $kb_is_relevant   = true;
+        $shared_ai        = null;
+
+        if ($should_validate) {
+            $shared_ai = new \CleverSay\AI();
+            $kb_is_relevant   = $shared_ai->validate_kb_answer($question, $kb_clean);
+            $kb_was_validated = true;
+            $logger->info('BulkTester Layer 1 validator', [
+                'question'    => mb_substr($question, 0, 80),
+                'is_relevant' => $kb_is_relevant,
+            ]);
+
+            $trigger = $validate_all_kb
+                ? 'validate_kb (all matches)'
+                : 'aadefault_validate (aadefault only)';
+            if ($kb_is_relevant) {
+                $push_step(
+                    'KB AI Validation (' . $trigger . ')',
+                    '✅ AI confirmed this KB answer is relevant to the question.',
+                    'not_needed'
+                );
+            } else {
+                $push_step(
+                    'KB AI Validation (' . $trigger . ')',
+                    '⚠️ AI determined this KB answer does NOT fit the question — production falls through to AI synthesis.',
+                    'would_fire'
+                );
+            }
+
+            if (!$kb_is_relevant) {
+                // Validator rejected — reroute to AI fallback, same as
+                // the live path's `goto ai_fallback` does.
+                $ai_answer = $this->try_ai_fallback($question, '');
+                $push_step(
+                    'AI Synthesis (KB rejected reroute)',
+                    $ai_answer
+                        ? 'AI generated a fresh answer using retrieved chunks.'
+                        : 'AI could not generate an answer. Widget would show no-answer message.',
+                    $ai_answer ? 'would_fire' : 'no_chunks'
+                );
+                return [
+                    'answer'        => $ai_answer ?? '',
+                    'path'          => 'kb_ai_rerouted',
+                    'was_validated' => true,
+                    'was_polished'  => false,
+                ];
+            }
+        } else {
+            $reason = !$ai_ok
+                ? 'AI not configured'
+                : (!$validate_all_kb && !$validate_aadefault
+                    ? 'KB validation disabled in network settings'
+                    : 'narrower aadefault setting active but match was not aadefault');
+            $push_step(
+                'KB AI Validation',
+                'Skipped — ' . $reason . '.',
+                'disabled'
+            );
+        }
+
+        // Validator accepted (or wasn't run). Now decide polish.
+        if ($polish_enabled) {
+            $stored_hash  = (string) ($first_match['polished_hash'] ?? '');
+            $current_hash = \CleverSay\Admin::compute_response_hash($raw_html);
+            $already_polished = ($stored_hash !== '' && $stored_hash === $current_hash);
+
+            if ($already_polished) {
+                $push_step(
+                    'Polish KB',
+                    'Skipped — entry was previously polished and has not changed since.',
+                    'not_needed'
+                );
+                // v4.42.17+: even when polish is skipped, the stored
+                // response may contain markdown (**bold**, [text](url))
+                // from a previous polish or admin paste. Run the
+                // converter so those markers render as HTML rather
+                // than as literal text in the widget.
+                return [
+                    'answer'        => \CleverSay\AI::convert_minimal_markdown_to_html($raw_html),
+                    'path'          => 'kb_raw',
+                    'was_validated' => $kb_was_validated,
+                    'was_polished'  => false,
+                ];
+            }
+
+            $ai = $shared_ai ?? new \CleverSay\AI();
+
+            // If we didn't validate above, polish-side validation runs
+            // and can also reject — same fall-through behavior.
+            $relevant_for_polish = $kb_was_validated
+                ? $kb_is_relevant
+                : $ai->validate_kb_answer($question, $kb_clean);
+
+            if (!$relevant_for_polish) {
+                $push_step(
+                    'Polish-stage validation',
+                    '⚠️ Polish-stage AI rejected the KB answer — falling through to AI synthesis.',
+                    'would_fire'
+                );
+                $ai_answer = $this->try_ai_fallback($question, '');
+                return [
+                    'answer'        => $ai_answer ?? '',
+                    'path'          => 'kb_ai_rerouted',
+                    'was_validated' => true,
+                    'was_polished'  => false,
+                ];
+            }
+
+            $polished = $ai->polish_kb_response($question, $raw_html);
+            if ($polished) {
+                $push_step(
+                    'Polish KB',
+                    '✅ AI rewrote the KB answer in a friendlier, conversational tone.',
+                    'would_fire'
+                );
+                return [
+                    'answer'        => $polished,
+                    'path'          => 'kb_polished',
+                    'was_validated' => $kb_was_validated,
+                    'was_polished'  => true,
+                ];
+            }
+            // Polish failed silently — fall through to raw.
+            $push_step(
+                'Polish KB',
+                'Polish call returned empty — serving raw KB answer.',
+                'no_chunks'
+            );
+        } else {
+            $push_step(
+                'Polish KB',
+                'Skipped — polish_kb disabled in network settings.',
+                'disabled'
+            );
+        }
+
+        return [
+            'answer'        => \CleverSay\AI::convert_minimal_markdown_to_html($raw_html),
+            'path'          => 'kb_raw',
+            'was_validated' => $kb_was_validated,
+            'was_polished'  => false,
+        ];
+    }
+
     private function try_ai_fallback(string $question, string $history_json = ''): ?string {
         $logger = Logger::instance();
 
@@ -1345,6 +1658,60 @@ class PublicFacing {
             return __("I'm not sure I understood that. Could you rephrase your question?", 'cleversay');
         }
 
+        // v4.42.14+: stateful affirmation resolution. The widget passes
+        // the user's literal message ("yes", "sure", etc.) but those are
+        // state-dependent operators — they mean nothing without the
+        // prior assistant turn's context. Without this step, retrieval
+        // runs against the literal token, finds garbage chunks, and
+        // synthesis bails with "I don't have specific details."
+        //
+        // The resolver classifies the message into one of:
+        //   - NOT_AFFIRMATION: normal query, pass through
+        //   - FOLLOWUP_ACCEPTANCE: bare "yes" after offered follow-up —
+        //     resolved query = the offered topic
+        //   - FOLLOWUP_WITH_Q: compound "yes when exactly?" — resolved
+        //     query = latent topic + new question, scoped
+        //   - ANSWER_CONFIRMATION: "yes" to "Did you mean X?" (rare
+        //     in current prompts; detected for observability)
+        //   - AFFIRMATION_NO_STATE: "yes" with no pending offer; passed
+        //     through unchanged, will likely produce weak retrieval
+        //
+        // Mode 'resolve_only' (v4.42.14 default) applies the resolution
+        // and feeds the resolved query into normal retrieval. Mode
+        // 'resolve_and_inherit' (v4.42.15+) will additionally inherit
+        // parent chunks. Mode 'off' disables the layer entirely.
+        $history_for_resolver = [];
+        if (!empty($history_json)) {
+            $decoded = json_decode(stripslashes($history_json), true);
+            if (is_array($decoded)) {
+                $history_for_resolver = $decoded;
+            }
+        }
+        $resolution = \CleverSay\FollowupResolver::resolve($question, $history_for_resolver);
+        $logger->info('Followup resolver', [
+            'decision'        => $resolution['decision'],
+            'resolved_query'  => $resolution['resolved_query'] === $question
+                                    ? '(unchanged)'
+                                    : substr((string) $resolution['resolved_query'], 0, 100),
+            'latent_topic'    => $resolution['latent_topic'],
+            'debug'           => $resolution['debug'],
+        ]);
+
+        // If the resolver produced a meaningful rewrite, use it. The
+        // four non-NOT_AFFIRMATION decisions all produce a resolved
+        // query that's safer to embed than the literal user message.
+        // AFFIRMATION_NO_STATE keeps the original message but is
+        // explicitly flagged for observability.
+        $retrieval_query = $question;
+        if ($resolution['decision'] !== \CleverSay\FollowupResolver::DECISION_NOT_AFFIRMATION
+            && \CleverSay\FollowupResolver::get_mode() !== \CleverSay\FollowupResolver::MODE_OFF) {
+            $resolved = (string) ($resolution['resolved_query'] ?? '');
+            if ($resolved !== '' && $resolved !== $question) {
+                $retrieval_query = $resolved;
+                \CleverSay\RequestTimer::instance()->set('followup_decision', $resolution['decision']);
+            }
+        }
+
         try {
             $ai = new AI();
 
@@ -1353,19 +1720,39 @@ class PublicFacing {
                 return null;
             }
 
+            // v4.41.5+: from this point on, AI fallback has committed —
+            // we'll do retrieval + synthesis even if either fails. Tag
+            // the timer so analytics can distinguish "AI was tried but
+            // produced no answer" from "AI was never tried" (the latter
+            // is the kb_strong / not-configured / gibberish case).
+            \CleverSay\RequestTimer::instance()->set('ai_fallback_fired', true);
+
             $indexer = new Indexer();
             $chunks  = [];
 
+            // v4.41.5+: time retrieval. Whether this dispatches to the
+            // Phase 3 hybrid Retriever (when use_hybrid_retrieval is on)
+            // or the legacy FULLTEXT path, the work happens inside
+            // find_relevant_chunks(). The exception-fallback to
+            // find_relevant_chunks_simple() is rare and small enough that
+            // we just include it in the same stage measurement.
+            //
+            // v4.42.14+: use $retrieval_query (possibly resolver-rewritten)
+            // rather than the literal $question. The downstream synthesis
+            // call still receives $question as the user's original
+            // intent — only retrieval is scoped to the resolved form.
+            \CleverSay\RequestTimer::instance()->start_stage('retrieval');
             try {
-                $chunks = $indexer->find_relevant_chunks($question);
+                $chunks = $indexer->find_relevant_chunks($retrieval_query);
             } catch (\Throwable $e) {
                 $logger->error('AI fallback: chunk retrieval threw exception', [
                     'error' => $e->getMessage(),
                     'file'  => $e->getFile(),
                     'line'  => $e->getLine(),
                 ]);
-                $chunks = $indexer->find_relevant_chunks_simple($question);
+                $chunks = $indexer->find_relevant_chunks_simple($retrieval_query);
             }
+            \CleverSay\RequestTimer::instance()->end_stage('retrieval');
 
             $logger->info('AI fallback chunks retrieved', [
                 'count'    => count($chunks),
@@ -1436,9 +1823,42 @@ class PublicFacing {
             $history = $cleaned_history;
         }
 
+            // v4.41.5+: time synthesis and capture token/cost data into
+            // the request metrics row. The existing $start_ms/$latency
+            // measurement is kept for AIDebugLog compatibility (the
+            // legacy `latency_ms` field consumed by the Inspector view).
             $start_ms = (int) (microtime(true) * 1000);
+            \CleverSay\RequestTimer::instance()->start_stage('synthesis');
             $result   = $ai->answer_with_context($question, $chunks, $history);
+            \CleverSay\RequestTimer::instance()->end_stage('synthesis');
             $latency  = (int) (microtime(true) * 1000) - $start_ms;
+
+            // Token + cost capture. answer_with_context returns these
+            // even on error responses (some token cost may have been
+            // incurred before the failure), so we record them
+            // unconditionally before the error gate below.
+            \CleverSay\RequestTimer::instance()->set(
+                'tokens_in',
+                isset($result['tokens_input']) ? (int) $result['tokens_input'] : null
+            );
+            \CleverSay\RequestTimer::instance()->set(
+                'tokens_out',
+                isset($result['tokens_output']) ? (int) $result['tokens_output'] : null
+            );
+            \CleverSay\RequestTimer::instance()->set(
+                'cost',
+                isset($result['cost']) ? (float) $result['cost'] : null
+            );
+            // v4.41.5.3+: record which model produced this synthesis.
+            // The accessor reads $this->synthesis_model on the AI
+            // instance — distinct from $this->model which is the
+            // default for validation/polish. Per-row capture means
+            // a mid-window model swap produces a clean A/B in the
+            // dashboard rather than mixing the two together.
+            \CleverSay\RequestTimer::instance()->set(
+                'synthesis_model',
+                $ai->get_synthesis_model()
+            );
 
             if (!empty($result['error']) || empty($result['answer'])) {
                 $logger->warning('AI fallback: API returned no answer', [
@@ -1476,7 +1896,14 @@ class PublicFacing {
                 ]);
             }
 
-            return $result['answer'];
+            // v4.42.15+: convert the model's markdown (**bold**, __bold__,
+            // [text](url)) to HTML before sending to the widget. The
+            // widget renders bot answers via innerHTML, so markdown that
+            // isn't converted appears literally on screen. Done AFTER
+            // the AI Inspector capture above so the inspector continues
+            // to show exactly what the model produced (raw markdown
+            // markers and all) — useful for prompt debugging.
+            return \CleverSay\AI::convert_minimal_markdown_to_html((string) $result['answer']);
 
         } catch (\Throwable $e) {
             Logger::instance()->error('AI fallback threw exception', [
@@ -2539,7 +2966,39 @@ class PublicFacing {
     public function ajax_search(): void {
         $logger = Logger::instance();
         $logger->info('=== PUBLIC SEARCH START ===');
-        
+
+        // v4.41.5.5+: latency observability. Start the request timer as
+        // the first non-logging action. Auth-failed requests are still
+        // measured for forensic value (a log line is emitted on flush)
+        // but no DB row is written without a question_id. RequestTimer
+        // is a per-request singleton; the shutdown handler in
+        // cleversay.php flushes regardless of how the response exits.
+        \CleverSay\RequestTimer::instance()->start_request();
+
+        // v4.41.5.8+: when the per-site Show Response Timing toggle is
+        // on, inject `total_ms` into the JSON response body via output
+        // buffering. Cleaner than touching every wp_send_json_success
+        // call site (there are dozens scattered across this method).
+        // The callback only fires when the buffer flushes (at wp_die
+        // time), so total_ms reflects the whole request work, including
+        // any apply_filters / response-shaping work that happens after
+        // the synthesis call returns. No-op when the flag is off.
+        if ((bool) get_option('cleversay_show_timing', false)) {
+            ob_start(function ($buffer) {
+                $decoded = json_decode($buffer, true);
+                if (is_array($decoded)
+                    && !empty($decoded['success'])
+                    && isset($decoded['data'])
+                    && is_array($decoded['data'])
+                ) {
+                    $decoded['data']['total_ms'] = \CleverSay\RequestTimer::instance()->total_ms();
+                    $reencoded = wp_json_encode($decoded);
+                    return $reencoded === false ? $buffer : $reencoded;
+                }
+                return $buffer;
+            });
+        }
+
         // Verify request authenticity.
         // Standard WordPress nonce works for same-site requests (wp_localize_script).
         // For cross-origin embed.js requests we accept a static embed token instead,
@@ -2693,6 +3152,10 @@ class PublicFacing {
             $logger->info('force_ai=1 — bypassing KB, going straight to AI');
             $ai_result = $this->try_ai_reanswer($query, $history_json);
             if ($ai_result) {
+                // v4.41.5+: force_ai means we deliberately skipped Layer 1
+                // (typically after a "Not Helpful" rating). Tag as ai_only
+                // since the answer came from the AI path with no KB help.
+                \CleverSay\RequestTimer::instance()->set('matched_layer', 'ai_only');
                 $is_casual       = $this->is_casual_query($query);
                 $is_deflection   = !$is_casual && $this->is_generic_deflection($ai_result);
                 // v4.37.138+: length-based safety net — see Layer-2 fallback
@@ -2759,11 +3222,23 @@ class PublicFacing {
              */
             do_action('cleversay_before_search', $query);
 
+            // v4.41.5+: time Layer 1 (Search::find_matches + keyword
+            // expansion + log_question). The whole work-unit of "KB
+            // search ran" is one stage for the dashboard's purposes.
+            \CleverSay\RequestTimer::instance()->start_stage('kb');
             $results = $search->search($query);
+            \CleverSay\RequestTimer::instance()->end_stage('kb');
+
             // Capture the questions_log id so log_ai_answer() can FK-link its row
             $this->current_logged_question_id = isset($results['logged_question_id'])
                 ? (int) $results['logged_question_id']
                 : null;
+            // v4.41.5+: feed the same id into the metrics row's FK so
+            // analytics can join request_metrics → cleversay_questions
+            // for question text and rating.
+            if ($this->current_logged_question_id !== null) {
+                \CleverSay\RequestTimer::instance()->set('question_id', $this->current_logged_question_id);
+            }
 
             /**
              * Filters search results before they are returned to the client.
@@ -2809,6 +3284,13 @@ class PublicFacing {
 
             // Results is an array with 'success', 'matches', 'suggested', etc.
             if ($layer1_strong) {
+                // v4.41.5+: tag this request as a Layer 1 win for analytics.
+                // Note this only takes effect if Layer 1 actually serves
+                // the answer — paths below this point may still hand off
+                // to AI fallback (e.g. KB validation rejection), in which
+                // case the AI fallback path overwrites matched_layer to
+                // 'kb_weak_with_ai' before its wp_send_json_success.
+                \CleverSay\RequestTimer::instance()->set('matched_layer', 'kb_strong');
                 $first_match = $results['matches'][0];
 
                 // v4.37.42+: KB-relevance validation. Two related settings:
@@ -3108,6 +3590,21 @@ class PublicFacing {
 
                 if ($ai_result !== null) {
                     $logger->info('AI fallback succeeded');
+
+                    // v4.41.5+: tag matched_layer for analytics. The
+                    // distinction matters for understanding retrieval
+                    // health: 'kb_weak_with_ai' means Layer 1 found
+                    // candidates but they weren't strong enough, so AI
+                    // drew on whatever chunks Phase 3 retrieval surfaced
+                    // and produced a usable answer; 'ai_only' means the
+                    // KB had nothing relevant and AI worked from chunks
+                    // alone. High 'ai_only' rates point at KB coverage
+                    // gaps; high 'kb_weak_with_ai' rates point at
+                    // pattern/keyword tuning.
+                    \CleverSay\RequestTimer::instance()->set(
+                        'matched_layer',
+                        $has_matches ? 'kb_weak_with_ai' : 'ai_only'
+                    );
 
                     // Determine if this is a substantive question worth showing the inquiry link
                     // Greetings, thanks, and very short inputs don't warrant a follow-up prompt

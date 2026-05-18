@@ -37,9 +37,18 @@ class NetworkSettings {
         // haven't migrated.
         'anthropic_api_key' => '',
         'gemini_api_key'    => '',
+        // v4.42.2+: third provider for GPT-4o mini evaluation.
+        'openai_api_key'    => '',
         'model'             => 'claude-haiku-4-5-20251001',
         'validator_model'   => 'claude-sonnet-4-5-20250929',
         'synthesis_model'   => 'claude-sonnet-4-5-20250929',
+        // v4.42.1+: polish_model is the model that AI-rewrites accepted
+        // KB answers in the configured tenant tone. Default Haiku (same
+        // as the general "default" model) because polish is a constrained
+        // transformation — keep all facts, rewrite tone — that doesn't
+        // benefit much from larger models. Operators can lift to Sonnet
+        // if they observe Haiku altering facts/numbers/URLs during polish.
+        'polish_model'      => 'claude-haiku-4-5-20251001',
         'max_tokens'        => 450,
         'ai_enabled'        => false,
         'monthly_budget'    => 0,
@@ -157,20 +166,29 @@ class NetworkSettings {
             $active_provider  = self::provider_for_model($model);
             $anthropic_key    = (string) ($net['anthropic_api_key'] ?? '');
             $gemini_key       = (string) ($net['gemini_api_key']    ?? '');
+            $openai_key       = (string) ($net['openai_api_key']    ?? '');
             $legacy_key       = (string) ($net['api_key']           ?? '');
-            $active_key = $active_provider === 'gemini'
-                ? ($gemini_key    !== '' ? $gemini_key    : $legacy_key)
-                : ($anthropic_key !== '' ? $anthropic_key : $legacy_key);
+            // v4.42.2+: three-way active-key resolution. Each provider
+            // has its own dedicated key; the legacy single-key fallback
+            // is preserved for pre-v4.37.74 installs that haven't saved
+            // a per-provider key yet.
+            $active_key = match ($active_provider) {
+                'gemini'    => ($gemini_key    !== '' ? $gemini_key    : $legacy_key),
+                'openai'    => ($openai_key    !== '' ? $openai_key    : ''),
+                default     => ($anthropic_key !== '' ? $anthropic_key : $legacy_key),
+            };
 
             return [
                 'api_key'            => $active_key,
                 'anthropic_api_key'  => $anthropic_key,
                 'gemini_api_key'     => $gemini_key,
+                'openai_api_key'     => $openai_key,
                 'active_provider'    => $active_provider,
                 'enabled'            => !empty($net['ai_enabled']),
                 'model'              => $model,
                 'validator_model'    => (string) ($net['validator_model'] ?? 'claude-sonnet-4-5-20250929'),
                 'synthesis_model'    => (string) ($net['synthesis_model'] ?? 'claude-sonnet-4-5-20250929'),
+                'polish_model'       => (string) ($net['polish_model']    ?? 'claude-haiku-4-5-20251001'),
                 'max_tokens'         => (int)   ($net['max_tokens']         ?? 450),
                 'monthly_budget'     => (float) ($net['monthly_budget']     ?? 0),
                 'fallback_threshold' => (int)   ($net['fallback_threshold'] ?? 70),
@@ -179,7 +197,11 @@ class NetworkSettings {
                 'aadefault_validate' => !empty($net['aadefault_validate']),
                 'multilingual'       => !empty($net['multilingual']),
                 // Per-site options that clients CAN configure
-                'max_chunks'         => (int)    get_option('cleversay_ai_max_chunks', 4),
+                // v4.41.0+: default sourced from Indexer::MAX_CHUNKS so all
+                // three places (this read, the single-site read below, and
+                // the save handler in Admin::handle_settings_save) agree.
+                // See Bug 6 in the v4.41.0 handoff brief.
+                'max_chunks'         => (int)    get_option('cleversay_ai_max_chunks', Indexer::MAX_CHUNKS),
                 'label'              => (string) get_option('cleversay_ai_label', 'AI-assisted answer'),
                 'normalize_queries'  => (bool)   get_option('cleversay_ai_normalize_queries', false),
             ];
@@ -191,20 +213,27 @@ class NetworkSettings {
         $active_provider = self::provider_for_model($model);
         $anthropic_key   = (string) get_option('cleversay_anthropic_api_key', '');
         $gemini_key      = (string) get_option('cleversay_gemini_api_key',    '');
+        $openai_key      = (string) get_option('cleversay_openai_api_key',    '');
         $legacy_key      = (string) get_option('cleversay_ai_api_key',        '');
-        $active_key = $active_provider === 'gemini'
-            ? ($gemini_key    !== '' ? $gemini_key    : $legacy_key)
-            : ($anthropic_key !== '' ? $anthropic_key : $legacy_key);
+        // v4.42.2+: three-way active-key resolution (single-site mirror
+        // of the multisite branch).
+        $active_key = match ($active_provider) {
+            'gemini' => ($gemini_key    !== '' ? $gemini_key    : $legacy_key),
+            'openai' => ($openai_key    !== '' ? $openai_key    : ''),
+            default  => ($anthropic_key !== '' ? $anthropic_key : $legacy_key),
+        };
 
         return [
             'api_key'            => $active_key,
             'anthropic_api_key'  => $anthropic_key,
             'gemini_api_key'     => $gemini_key,
+            'openai_api_key'     => $openai_key,
             'active_provider'    => $active_provider,
             'enabled'            => (bool)   get_option('cleversay_ai_enabled',           false),
             'model'              => $model,
             'validator_model'    => (string) get_option('cleversay_ai_validator_model',   'claude-sonnet-4-5-20250929'),
             'synthesis_model'    => (string) get_option('cleversay_ai_synthesis_model',   'claude-sonnet-4-5-20250929'),
+            'polish_model'       => (string) get_option('cleversay_ai_polish_model',      'claude-haiku-4-5-20251001'),
             'max_tokens'         => (int)    get_option('cleversay_ai_max_tokens',        450),
             'monthly_budget'     => (float)  get_option('cleversay_ai_monthly_budget',    0),
             'fallback_threshold' => (int)    get_option('cleversay_ai_min_score',         70),
@@ -212,25 +241,35 @@ class NetworkSettings {
             'polish_kb'          => (bool)   get_option('cleversay_ai_polish_kb',         true),
             'aadefault_validate' => (bool)   get_option('cleversay_ai_aadefault_validate',false),
             'multilingual'       => (bool)   get_option('cleversay_ai_multilingual',      false),
-            'max_chunks'         => (int)    get_option('cleversay_ai_max_chunks',        4),
+            // v4.41.0+: same canonical default — see Bug 6 in handoff brief.
+            'max_chunks'         => (int)    get_option('cleversay_ai_max_chunks',        Indexer::MAX_CHUNKS),
             'label'              => (string) get_option('cleversay_ai_label',             'AI-assisted answer'),
             'normalize_queries'  => (bool)   get_option('cleversay_ai_normalize_queries', false),
         ];
     }
 
     /**
-     * Map a model string to its provider key ("anthropic" or "gemini").
+     * Map a model string to its provider key ("anthropic", "gemini",
+     * or "openai").
      *
      * Lightweight version of \CleverSay\AI's PRICING-table lookup that
      * doesn't require the AI class to be loaded. Used by settings
      * resolution which runs on every admin page render.
      *
+     * v4.42.2+: extended to recognize OpenAI's gpt-* model family.
+     *
      * @since 4.37.74
      */
     public static function provider_for_model(string $model): string {
-        if ($model === '' || stripos($model, 'gemini') === 0 || stripos($model, 'gemini-') !== false) {
-            // gemini-3-flash-preview, gemini-2.5-flash, etc.
-            return stripos($model, 'gemini') !== false ? 'gemini' : 'anthropic';
+        if ($model === '') {
+            return 'anthropic';
+        }
+        // OpenAI gpt-* model family (gpt-4o-mini, gpt-4o, gpt-4.1*, etc.)
+        if (stripos($model, 'gpt-') === 0 || stripos($model, 'o1-') === 0 || stripos($model, 'o3-') === 0) {
+            return 'openai';
+        }
+        if (stripos($model, 'gemini') !== false) {
+            return 'gemini';
         }
         return 'anthropic';
     }

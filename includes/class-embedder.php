@@ -467,6 +467,30 @@ class Embedder {
 
     /**
      * Return queue statistics for the admin status panel.
+     *
+     * v4.41.0+: "embedded" counts are now integrity-checked. Previously
+     * we counted Supabase rows by content_type and reported that as the
+     * "done" number — but that count included rows whose content_id no
+     * longer maps to any current MySQL row (e.g. chunks deleted during
+     * a re-index, or the famous tenant_id='1' stranded rows on
+     * jasa-server.com). The new counter intersects Supabase rows with
+     * the live MySQL ID set, so what's reported is "rows that actually
+     * back current MySQL content" — matching what an operator's mental
+     * model expects. Stranded rows surface as `stranded_rows` instead.
+     *
+     * Returned keys:
+     *   - pending, processing, failed: queue counts for this blog
+     *   - total_kb_entries:   COUNT FROM cleversay_knowledge WHERE active
+     *   - total_chunks:       COUNT FROM cleversay_chunks
+     *   - embedded_kb_entries: Supabase kb_entry rows whose content_id
+     *                          maps to a currently-active MySQL KB entry
+     *   - embedded_chunks:    Supabase chunk rows whose content_id maps
+     *                          to a currently-existing MySQL chunk
+     *   - stranded_rows:      total Supabase current-rows for this tenant
+     *                          minus the embedded counts. Non-zero indicates
+     *                          stale or misfiled rows that should be cleaned.
+     *
+     * See Bug 8 in the v4.41.0 handoff brief.
      */
     public function get_queue_stats(): array {
         $blog_id = (int) get_current_blog_id();
@@ -484,7 +508,7 @@ class Embedder {
             $stats[$row['status']] = (int) $row['n'];
         }
 
-        // Total content count for context
+        // Total content count for context (the denominators in the UI).
         $total_kb = (int) $this->wpdb->get_var(
             "SELECT COUNT(*) FROM {$this->knowledge_table} WHERE status = 'active'"
         );
@@ -492,34 +516,516 @@ class Embedder {
             "SELECT COUNT(*) FROM {$this->chunks_table}"
         );
         $stats['total_kb_entries'] = $total_kb;
-        $stats['total_chunks'] = $total_chunks;
+        $stats['total_chunks']     = $total_chunks;
 
-        // Embedded count from Supabase
+        // Embedded counts — integrity-checked against live MySQL rows.
         try {
             $tenant_id = (string) $blog_id;
-            $rows = Supabase::instance()->query(
-                "SELECT content_type, COUNT(*) AS n
+
+            // Pull the set of (content_type, content_id) pairs that currently
+            // exist in Supabase for this tenant, scoped to is_current rows.
+            $sb_rows = Supabase::instance()->query(
+                "SELECT content_type, content_id
                  FROM cleversay_chunks
-                 WHERE tenant_id = :tid AND is_current = TRUE
-                 GROUP BY content_type",
+                 WHERE tenant_id = :tid AND is_current = TRUE",
                 ['tid' => $tenant_id]
             );
-            $stats['embedded_kb_entries'] = 0;
-            $stats['embedded_chunks'] = 0;
-            foreach ($rows as $row) {
-                if ($row['content_type'] === 'kb_entry') {
-                    $stats['embedded_kb_entries'] = (int) $row['n'];
-                } elseif ($row['content_type'] === 'chunk') {
-                    $stats['embedded_chunks'] = (int) $row['n'];
+
+            $sb_kb_ids    = [];
+            $sb_chunk_ids = [];
+            foreach ($sb_rows as $r) {
+                $cid = (int) $r['content_id'];
+                if ($r['content_type'] === 'kb_entry') {
+                    $sb_kb_ids[$cid] = true;
+                } elseif ($r['content_type'] === 'chunk') {
+                    $sb_chunk_ids[$cid] = true;
                 }
             }
+
+            $stats['embedded_kb_entries'] = $this->count_intersection_with_mysql(
+                array_keys($sb_kb_ids),
+                $this->knowledge_table,
+                "status = 'active'"
+            );
+            $stats['embedded_chunks'] = $this->count_intersection_with_mysql(
+                array_keys($sb_chunk_ids),
+                $this->chunks_table
+            );
+
+            // Stranded = Supabase rows that didn't match a live MySQL row.
+            // Useful for surfacing the "673 leftover blog 1 rows" scenario.
+            $supabase_total = count($sb_kb_ids) + count($sb_chunk_ids);
+            $matched_total  = $stats['embedded_kb_entries'] + $stats['embedded_chunks'];
+            $stats['stranded_rows'] = max(0, $supabase_total - $matched_total);
         } catch (\Throwable $e) {
             $stats['embedded_kb_entries'] = null;
-            $stats['embedded_chunks'] = null;
+            $stats['embedded_chunks']     = null;
+            $stats['stranded_rows']       = null;
             $stats['supabase_query_error'] = $e->getMessage();
         }
 
         return $stats;
+    }
+
+    /**
+     * Helper: count how many of the given content IDs still exist in the
+     * given MySQL table, optionally with an extra WHERE clause. Used by
+     * get_queue_stats() to compute the integrity-checked embedded counts.
+     *
+     * Empty input → 0 (no need to query).
+     *
+     * @param int[]       $ids
+     * @param string      $table       Fully-qualified table name (with prefix)
+     * @param string|null $extra_where Optional additional condition (no leading AND)
+     */
+    private function count_intersection_with_mysql(array $ids, string $table, ?string $extra_where = null): int {
+        if (empty($ids)) {
+            return 0;
+        }
+        // Build a placeholder list and bind the IDs as integers.
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $sql = "SELECT COUNT(*) FROM {$table} WHERE id IN ({$placeholders})";
+        if ($extra_where !== null && $extra_where !== '') {
+            $sql .= " AND ({$extra_where})";
+        }
+        return (int) $this->wpdb->get_var(
+            $this->wpdb->prepare($sql, ...array_map('intval', $ids))
+        );
+    }
+
+    /**
+     * Maximum number of strands the auto-cleanup will delete in one run
+     * without admin confirmation. If a tenant has more than this many
+     * strands, the cleanup refuses to proceed and surfaces a louder
+     * warning instead.
+     *
+     * The reasoning: a few dozen strands is normal background noise
+     * from intermittent network blips during indexing. A thousand-plus
+     * strands suggests something systemically broken (e.g., MySQL was
+     * wiped without going through the app's delete handlers) where
+     * mass-deletion in Supabase might not be the right response —
+     * an admin should investigate first.
+     *
+     * @since 4.42.31
+     */
+    public const STRAND_CLEANUP_SAFETY_MAX = 1000;
+
+    /**
+     * Hard-delete Supabase rows whose content_id no longer maps to a
+     * current MySQL row for the current tenant. This is the operation
+     * the "Clean Up Stranded Rows" button on the Embeddings page and
+     * the daily cleanup cron invoke.
+     *
+     * Why hard delete vs soft delete:
+     *   The system uses soft-delete (is_current=FALSE) for active
+     *   content that's being replaced — the historical embedding is
+     *   kept in case it's useful for audit. Strands are different:
+     *   the MySQL row they pointed to no longer exists, so there's
+     *   nothing to "come back." Soft-deleting just keeps dead data
+     *   around indefinitely. Hard delete reclaims storage.
+     *
+     * Safety brake:
+     *   If strands exceed STRAND_CLEANUP_SAFETY_MAX, the method
+     *   returns an error result without deleting anything. The caller
+     *   should surface this to admin for investigation. Set
+     *   $force=true to bypass the threshold; admins use this from the
+     *   manual button after reviewing the count.
+     *
+     * Scope:
+     *   Strict per-tenant. Reads tenant_id from get_current_blog_id().
+     *   Multisite cron iterates each blog with proper switch_to_blog
+     *   boundaries — see cleversay_run_daily_stranded_cleanup() in
+     *   cleversay.php.
+     *
+     * Return shape (always an array, never throws):
+     *   - success:        bool — true if the operation completed
+     *   - deleted:        int  — rows actually deleted (zero on failure
+     *                            or no-op)
+     *   - found:          int  — strands detected before deletion
+     *   - reason:         string — set only on failure
+     *                              ('safety_threshold' | 'db_error' |
+     *                               'supabase_disabled')
+     *   - safety_threshold: int — included when reason='safety_threshold'
+     *
+     * @since 4.42.31
+     * @param bool $force If true, skip the STRAND_CLEANUP_SAFETY_MAX check.
+     * @return array{success: bool, deleted: int, found: int, reason?: string}
+     */
+    public function cleanup_stranded_rows(bool $force = false): array {
+        if (!Supabase::is_enabled()) {
+            return [
+                'success' => false,
+                'deleted' => 0,
+                'found'   => 0,
+                'reason'  => 'supabase_disabled',
+            ];
+        }
+
+        $tenant_id = (string) get_current_blog_id();
+
+        try {
+            // Step 1: Enumerate all current Supabase rows for this tenant.
+            // Crucially, we fetch both content_type AND content_id together
+            // so we don't conflate KB entries with chunks — they share the
+            // content_id integer space but have different MySQL backing
+            // tables.
+            $sb_rows = Supabase::instance()->query(
+                "SELECT content_type, content_id
+                 FROM cleversay_chunks
+                 WHERE tenant_id = :tid AND is_current = TRUE",
+                ['tid' => $tenant_id]
+            );
+
+            $sb_kb_ids    = [];
+            $sb_chunk_ids = [];
+            foreach ($sb_rows as $r) {
+                $cid = (int) $r['content_id'];
+                if ($r['content_type'] === 'kb_entry') {
+                    $sb_kb_ids[$cid] = true;
+                } elseif ($r['content_type'] === 'chunk') {
+                    $sb_chunk_ids[$cid] = true;
+                }
+            }
+
+            // Step 2: For each set, identify which IDs are present in
+            // Supabase but missing from MySQL. Those are the strands.
+            $stranded_kb = $this->find_missing_in_mysql(
+                array_keys($sb_kb_ids),
+                $this->knowledge_table,
+                "status = 'active'"
+            );
+            $stranded_chunks = $this->find_missing_in_mysql(
+                array_keys($sb_chunk_ids),
+                $this->chunks_table
+            );
+
+            $total_stranded = count($stranded_kb) + count($stranded_chunks);
+
+            // No strands → success, nothing to do.
+            if ($total_stranded === 0) {
+                return [
+                    'success' => true,
+                    'deleted' => 0,
+                    'found'   => 0,
+                ];
+            }
+
+            // Step 3: Apply safety brake unless forced.
+            if (!$force && $total_stranded > self::STRAND_CLEANUP_SAFETY_MAX) {
+                $this->logger->warning('Strand cleanup refused: count exceeds safety threshold', [
+                    'tenant_id'        => $tenant_id,
+                    'stranded_total'   => $total_stranded,
+                    'safety_threshold' => self::STRAND_CLEANUP_SAFETY_MAX,
+                ]);
+                return [
+                    'success'          => false,
+                    'deleted'          => 0,
+                    'found'            => $total_stranded,
+                    'reason'           => 'safety_threshold',
+                    'safety_threshold' => self::STRAND_CLEANUP_SAFETY_MAX,
+                ];
+            }
+
+            // Step 4: Hard delete. Done as two batched DELETEs (one per
+            // content_type) using IN clauses. Each batch is wrapped in
+            // a transaction so a mid-operation failure doesn't leave
+            // half-deleted state.
+            $deleted = 0;
+            $pdo = Supabase::instance()->connect();
+
+            if (!empty($stranded_kb)) {
+                $deleted += $this->delete_stranded_batch($pdo, $tenant_id, 'kb_entry', $stranded_kb);
+            }
+            if (!empty($stranded_chunks)) {
+                $deleted += $this->delete_stranded_batch($pdo, $tenant_id, 'chunk', $stranded_chunks);
+            }
+
+            $this->logger->info('Strand cleanup completed', [
+                'tenant_id' => $tenant_id,
+                'found'     => $total_stranded,
+                'deleted'   => $deleted,
+                'forced'    => $force,
+            ]);
+
+            return [
+                'success' => true,
+                'deleted' => $deleted,
+                'found'   => $total_stranded,
+            ];
+        } catch (\Throwable $e) {
+            $this->logger->error('Strand cleanup failed', [
+                'tenant_id' => $tenant_id,
+                'error'     => $e->getMessage(),
+            ]);
+            return [
+                'success' => false,
+                'deleted' => 0,
+                'found'   => 0,
+                'reason'  => 'db_error',
+                'error'   => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Helper: return the subset of $ids that do NOT exist in $table
+     * (optionally filtered by $extra_where). The inverse of
+     * count_intersection_with_mysql.
+     *
+     * Empty input → empty result.
+     *
+     * @param int[]       $ids
+     * @param string      $table
+     * @param string|null $extra_where
+     * @return int[]      The IDs that are missing from MySQL.
+     */
+    private function find_missing_in_mysql(array $ids, string $table, ?string $extra_where = null): array {
+        if (empty($ids)) {
+            return [];
+        }
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $sql = "SELECT id FROM {$table} WHERE id IN ({$placeholders})";
+        if ($extra_where !== null && $extra_where !== '') {
+            $sql .= " AND ({$extra_where})";
+        }
+        $present = $this->wpdb->get_col($this->wpdb->prepare($sql, ...$ids));
+        $present_set = array_flip(array_map('intval', $present));
+        $missing = [];
+        foreach ($ids as $id) {
+            if (!isset($present_set[$id])) {
+                $missing[] = $id;
+            }
+        }
+        return $missing;
+    }
+
+    /**
+     * Helper: execute a transactioned DELETE on Supabase for the given
+     * content_type and list of content_ids. Returns count of rows
+     * deleted (0 on failure or empty input).
+     *
+     * Why batch with IN: a single DELETE with IN is dramatically faster
+     * than N round-trips, and Postgres handles IN clauses of thousands
+     * of values comfortably. For very large strand counts, the safety
+     * brake fires before we get here.
+     *
+     * @since 4.42.31
+     */
+    private function delete_stranded_batch(\PDO $pdo, string $tenant_id, string $content_type, array $ids): int {
+        if (empty($ids)) {
+            return 0;
+        }
+        $placeholders = [];
+        $params = [
+            'tid'   => $tenant_id,
+            'ctype' => $content_type,
+        ];
+        foreach ($ids as $i => $id) {
+            $key = 'cid' . $i;
+            $placeholders[] = ':' . $key;
+            $params[$key]   = (int) $id;
+        }
+        $sql = "DELETE FROM cleversay_chunks
+                WHERE tenant_id = :tid
+                  AND content_type = :ctype
+                  AND content_id IN (" . implode(',', $placeholders) . ")";
+
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $rowcount = $stmt->rowCount();
+            $pdo->commit();
+            return (int) $rowcount;
+        } catch (\Throwable $e) {
+            $pdo->rollBack();
+            $this->logger->error('Stranded batch delete failed', [
+                'tenant_id'    => $tenant_id,
+                'content_type' => $content_type,
+                'batch_size'   => count($ids),
+                'error'        => $e->getMessage(),
+            ]);
+            return 0;
+        }
+    }
+
+    /**
+     * Maximum number of items the auto-backfill (cron path) will enqueue
+     * in a single run without explicit admin action. The reasoning
+     * matches STRAND_CLEANUP_SAFETY_MAX: an unusually large gap (say,
+     * 5000 KB entries with no embeddings) is likely a bulk import or
+     * a multisite import situation where automatic enqueueing of
+     * everything would consume real API credits and many hours of
+     * cron processing. Better to surface the count for admin
+     * attention than silently start a multi-hour run.
+     *
+     * Manual button passes $force=true to bypass this.
+     *
+     * @since 4.42.32
+     */
+    public const BACKFILL_AUTO_MAX = 200;
+
+    /**
+     * Find content that exists in MySQL but has no current Supabase
+     * embedding, and enqueue it for embedding generation. The inverse
+     * of cleanup_stranded_rows. Together they form a complete
+     * bidirectional integrity loop.
+     *
+     * Detection scope:
+     *   - Active KB entries in cleversay_knowledge (status='active')
+     *   - All chunks in cleversay_chunks
+     *
+     * For each set, compares against the tenant's current Supabase
+     * rows (is_current=TRUE). MySQL IDs absent from Supabase are
+     * "missing" — they need embeddings created.
+     *
+     * Safety brake:
+     *   Non-forced runs cap at BACKFILL_AUTO_MAX items per run. Above
+     *   the cap, the run refuses and surfaces the count for admin
+     *   attention. Manual button passes $force=true.
+     *
+     * Idempotency:
+     *   Uses the existing enqueue() which has ON DUPLICATE KEY UPDATE
+     *   semantics on (content_type, content_id, blog_id). Items
+     *   already in the queue get reset to pending; new items get
+     *   inserted. Safe to run repeatedly.
+     *
+     * Return shape (always an array, never throws):
+     *   - success:    bool
+     *   - enqueued:   int — items added to the queue this run
+     *   - found:      int — missing items detected
+     *   - reason:     string — set only on failure
+     *                  ('safety_threshold' | 'db_error' | 'supabase_disabled')
+     *   - safety_threshold: int — included when reason='safety_threshold'
+     *
+     * @since 4.42.32
+     * @param bool $force If true, skip the BACKFILL_AUTO_MAX check.
+     * @return array{success: bool, enqueued: int, found: int, reason?: string}
+     */
+    public function backfill_missing_embeddings(bool $force = false): array {
+        if (!Supabase::is_enabled()) {
+            return [
+                'success'  => false,
+                'enqueued' => 0,
+                'found'    => 0,
+                'reason'   => 'supabase_disabled',
+            ];
+        }
+
+        $tenant_id = (string) get_current_blog_id();
+
+        try {
+            // Step 1: Get current Supabase (content_type, content_id) pairs.
+            // Same query the strand-cleanup uses, so the work the system
+            // does for these two integrity operations is symmetric.
+            $sb_rows = Supabase::instance()->query(
+                "SELECT content_type, content_id
+                 FROM cleversay_chunks
+                 WHERE tenant_id = :tid AND is_current = TRUE",
+                ['tid' => $tenant_id]
+            );
+
+            $sb_kb_ids    = [];
+            $sb_chunk_ids = [];
+            foreach ($sb_rows as $r) {
+                $cid = (int) $r['content_id'];
+                if ($r['content_type'] === 'kb_entry') {
+                    $sb_kb_ids[$cid] = true;
+                } elseif ($r['content_type'] === 'chunk') {
+                    $sb_chunk_ids[$cid] = true;
+                }
+            }
+
+            // Step 2: Get MySQL IDs we expect to find in Supabase.
+            $mysql_kb_ids = array_map('intval', $this->wpdb->get_col(
+                "SELECT id FROM {$this->knowledge_table} WHERE status = 'active'"
+            ));
+            $mysql_chunk_ids = array_map('intval', $this->wpdb->get_col(
+                "SELECT id FROM {$this->chunks_table}"
+            ));
+
+            // Step 3: Compute the diff. MySQL IDs not present in the
+            // Supabase set are the ones that need embeddings created.
+            $missing_kb = [];
+            foreach ($mysql_kb_ids as $id) {
+                if (!isset($sb_kb_ids[$id])) {
+                    $missing_kb[] = $id;
+                }
+            }
+            $missing_chunks = [];
+            foreach ($mysql_chunk_ids as $id) {
+                if (!isset($sb_chunk_ids[$id])) {
+                    $missing_chunks[] = $id;
+                }
+            }
+
+            $total_missing = count($missing_kb) + count($missing_chunks);
+
+            if ($total_missing === 0) {
+                return [
+                    'success'  => true,
+                    'enqueued' => 0,
+                    'found'    => 0,
+                ];
+            }
+
+            // Step 4: Safety brake unless forced.
+            if (!$force && $total_missing > self::BACKFILL_AUTO_MAX) {
+                $this->logger->warning('Auto-backfill refused: count exceeds safety threshold', [
+                    'tenant_id'        => $tenant_id,
+                    'missing_total'    => $total_missing,
+                    'safety_threshold' => self::BACKFILL_AUTO_MAX,
+                ]);
+                return [
+                    'success'          => false,
+                    'enqueued'         => 0,
+                    'found'            => $total_missing,
+                    'reason'           => 'safety_threshold',
+                    'safety_threshold' => self::BACKFILL_AUTO_MAX,
+                ];
+            }
+
+            // Step 5: Enqueue. The existing enqueue() uses ON DUPLICATE
+            // KEY UPDATE so any items already in the queue just get
+            // their status reset to pending without duplicate inserts.
+            $enqueued = 0;
+            foreach ($missing_kb as $id) {
+                $this->enqueue('kb_entry', (int) $id);
+                $enqueued++;
+            }
+            foreach ($missing_chunks as $id) {
+                $this->enqueue('chunk', (int) $id);
+                $enqueued++;
+            }
+
+            $this->logger->info('Auto-backfill enqueued missing embeddings', [
+                'tenant_id'      => $tenant_id,
+                'found'          => $total_missing,
+                'enqueued'       => $enqueued,
+                'kb_entries'     => count($missing_kb),
+                'chunks'         => count($missing_chunks),
+                'forced'         => $force,
+            ]);
+
+            return [
+                'success'  => true,
+                'enqueued' => $enqueued,
+                'found'    => $total_missing,
+            ];
+        } catch (\Throwable $e) {
+            $this->logger->error('Auto-backfill failed', [
+                'tenant_id' => $tenant_id,
+                'error'     => $e->getMessage(),
+            ]);
+            return [
+                'success'  => false,
+                'enqueued' => 0,
+                'found'    => 0,
+                'reason'   => 'db_error',
+                'error'    => $e->getMessage(),
+            ];
+        }
     }
 
     /**
@@ -542,6 +1048,11 @@ class Embedder {
     /**
      * Insert or update an embedding row in Supabase.
      * Uses ON CONFLICT semantics keyed on (tenant_id, content_type, content_id).
+     *
+     * v4.41.0+: every row also writes source_namespace — 'source' for
+     * chunks, 'kb' for KB entries — so diagnostic and retrieval queries
+     * can scope by namespace without overloading content_type. See
+     * Bug 4 in the v4.41.0 handoff brief.
      */
     private function upsert_supabase_row(
         string $content_type,
@@ -554,6 +1065,7 @@ class Embedder {
         $tenant_id  = (string) get_current_blog_id();
         $chunk_hash = hash('sha256', $chunk_text);
         $vector_pg  = Supabase::vector_to_pg($vector);
+        $namespace  = self::namespace_for_content_type($content_type);
 
         try {
             // We use a "delete then insert" strategy for upsert. The
@@ -579,11 +1091,13 @@ class Embedder {
                 $ins = $pdo->prepare(
                     "INSERT INTO cleversay_chunks
                      (tenant_id, content_type, content_id, source_id,
+                      source_namespace,
                       chunk_hash, chunk_index, chunk_text, metadata,
                       embedding, embedding_model, embedding_version,
                       is_current, updated_at, created_at)
                      VALUES
                      (:tid, :ctype, :cid, :sid,
+                      :ns,
                       :hash, :cidx, :text, :meta::jsonb,
                       :vec::vector, :model, 1,
                       TRUE, NOW(), NOW())"
@@ -593,6 +1107,7 @@ class Embedder {
                     'ctype' => $content_type,
                     'cid'   => $content_id,
                     'sid'   => $source_id,
+                    'ns'    => $namespace,
                     'hash'  => $chunk_hash,
                     'cidx'  => (int) ($metadata['chunk_index'] ?? 0),
                     'text'  => $chunk_text,
@@ -615,6 +1130,18 @@ class Embedder {
             ]);
             return false;
         }
+    }
+
+    /**
+     * v4.41.0+: Map content_type to source_namespace.
+     * 'chunk'    → 'source'  (cleversay_sources is the underlying source)
+     * 'kb_entry' → 'kb'      (cleversay_knowledge entries are self-sourced)
+     *
+     * Centralized so the migration backfill and runtime writes stay in
+     * sync. Unknown types default to 'source' as the conservative choice.
+     */
+    private static function namespace_for_content_type(string $content_type): string {
+        return $content_type === 'kb_entry' ? 'kb' : 'source';
     }
 
     /**

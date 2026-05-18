@@ -160,7 +160,22 @@ class Retriever {
             if ($top_sim <= self::SIMILARITY_GATE) {
                 $log['gate_triggered'] = true;
                 $this->logger->info('Retriever distance gate fired — returning empty', $log);
+                // v4.41.5+: surface the gate fire to the request timer so
+                // analytics can answer "what fraction of hybrid requests
+                // hit the gate?" without parsing log lines. Best-effort —
+                // RequestTimer is null-safe via singleton bootstrap.
+                if (class_exists('\\CleverSay\\RequestTimer')) {
+                    \CleverSay\RequestTimer::instance()->set('gate_fired', true);
+                }
                 return [];
+            }
+            // v4.41.5+: only set gate_fired=false when vector ran AND
+            // produced results AND the gate didn't trip. Leaving it null
+            // when vector was skipped/failed lets analytics distinguish
+            // "gate evaluated and passed" from "gate never had a chance
+            // to evaluate" (e.g. tenant not indexed yet).
+            if (class_exists('\\CleverSay\\RequestTimer')) {
+                \CleverSay\RequestTimer::instance()->set('gate_fired', false);
             }
         } elseif (!$vector_failed && empty($vector_results)) {
             $this->logger->warning('Retriever vector returned 0 rows; falling back to FULLTEXT', [
@@ -188,12 +203,53 @@ class Retriever {
         )));
 
         $this->logger->info('Retriever query', $log);
+
+        // v4.42.0+: stash the diagnostic blob for callers (notably
+        // BulkTester) that want the same fields without parsing logs.
+        // Static so it crosses class boundaries cheaply; cleared per
+        // call by the caller when they care about isolating one query.
+        self::$last_diagnostics = $log;
+
         return $rows;
+    }
+
+    /**
+     * v4.42.0+: most recent retrieve() call's diagnostic fields. Same
+     * shape as the 'Retriever query' log line. Reset by caller via
+     * clear_last_diagnostics() before invoking retrieve().
+     *
+     * @var array<string,mixed>|null
+     */
+    private static ?array $last_diagnostics = null;
+
+    /**
+     * Read the diagnostic blob from the most recent retrieve() call.
+     * Returns null if none has happened in this PHP process yet.
+     */
+    public static function get_last_diagnostics(): ?array {
+        return self::$last_diagnostics;
+    }
+
+    /**
+     * Clear the static diagnostics buffer. Caller should invoke this
+     * before each retrieve() if they want clean per-call data.
+     */
+    public static function clear_last_diagnostics(): void {
+        self::$last_diagnostics = null;
     }
 
     /**
      * Top-N vector ANN search against Supabase. Returns rows with
      * content_id, source_id, chunk_text, similarity (descending sim).
+     *
+     * v4.41.0+: filters by source_namespace='source' in addition to
+     * content_type='chunk'. Defense in depth — content_type alone has
+     * always been correct for chunks, but the source_namespace column
+     * gives us a second guard against any future content-typing drift,
+     * and the namespace-scoped index makes this filter cheap. Older
+     * pre-migration rows where source_namespace IS NULL are still
+     * matched via the content_type clause. See Bug 4 in the v4.41.0
+     * handoff brief.
      */
     private function vector_search(array $qvec, string $tenant_id): array {
         // Two distinct placeholders intentionally bound to the same value.
@@ -204,6 +260,7 @@ class Retriever {
                 FROM cleversay_chunks
                 WHERE tenant_id    = :tid
                   AND content_type = 'chunk'
+                  AND (source_namespace = 'source' OR source_namespace IS NULL)
                   AND is_current   = TRUE
                 ORDER BY embedding <=> :qvec_sort::vector
                 LIMIT " . (int) self::VECTOR_TOP_N;

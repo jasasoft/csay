@@ -308,6 +308,100 @@ class Supabase {
     }
 
     /**
+     * v4.41.0+: One-time migration that adds the source_namespace column
+     * to cleversay_chunks and backfills it from content_type. Idempotent —
+     * safe to run repeatedly. Tracks completion in a network option so
+     * subsequent plugin loads skip the work.
+     *
+     * Best-effort: if Supabase isn't reachable (network outage during
+     * activation), returns false without throwing. Retrieval still
+     * works because the Retriever's vector_search continues to filter
+     * by content_type='chunk' as a fallback for rows where
+     * source_namespace might be NULL.
+     *
+     * Schema steps performed:
+     *   1. ALTER TABLE ... ADD COLUMN IF NOT EXISTS source_namespace TEXT
+     *   2. UPDATE rows where source_namespace IS NULL based on content_type
+     *   3. CREATE INDEX IF NOT EXISTS cleversay_chunks_namespace_idx
+     *
+     * Mapping: content_type='chunk'    → source_namespace='source'
+     *          content_type='kb_entry' → source_namespace='kb'
+     *
+     * @return array {success: bool, message: string, rows_backfilled: int}
+     */
+    public function run_namespace_migration(): array {
+        if (!self::is_enabled()) {
+            return [
+                'success'         => false,
+                'message'         => 'Skipped — Supabase is not enabled.',
+                'rows_backfilled' => 0,
+            ];
+        }
+
+        try {
+            $pdo = $this->connect();
+        } catch (\PDOException $e) {
+            $this->logger->warning('Namespace migration could not connect; will retry next admin load', [
+                'error' => $e->getMessage(),
+            ]);
+            return [
+                'success'         => false,
+                'message'         => 'Connection failed: ' . $e->getMessage(),
+                'rows_backfilled' => 0,
+            ];
+        }
+
+        try {
+            // Step 1: add the column. Postgres has had IF NOT EXISTS on
+            // ADD COLUMN since 9.6 so this is safe to run repeatedly.
+            $pdo->exec(
+                "ALTER TABLE cleversay_chunks
+                 ADD COLUMN IF NOT EXISTS source_namespace TEXT"
+            );
+
+            // Step 2: backfill any NULL rows. Maps content_type to namespace.
+            // Limited to rows where source_namespace IS NULL so re-runs
+            // don't rewrite already-migrated data.
+            $rows = (int) $pdo->exec(
+                "UPDATE cleversay_chunks
+                 SET source_namespace = CASE
+                     WHEN content_type = 'chunk'    THEN 'source'
+                     WHEN content_type = 'kb_entry' THEN 'kb'
+                     ELSE source_namespace
+                 END
+                 WHERE source_namespace IS NULL"
+            );
+
+            // Step 3: create the namespace-scoped index. Same IF NOT EXISTS
+            // semantics as the rest of the schema file.
+            $pdo->exec(
+                "CREATE INDEX IF NOT EXISTS cleversay_chunks_namespace_idx
+                 ON cleversay_chunks (tenant_id, source_namespace, is_current)
+                 WHERE is_current = TRUE"
+            );
+
+            $this->logger->info('Supabase namespace migration completed', [
+                'rows_backfilled' => $rows,
+            ]);
+
+            return [
+                'success'         => true,
+                'message'         => sprintf('Migration complete. Backfilled %d rows.', $rows),
+                'rows_backfilled' => $rows,
+            ];
+        } catch (\PDOException $e) {
+            $this->logger->error('Supabase namespace migration failed', [
+                'error' => $e->getMessage(),
+            ]);
+            return [
+                'success'         => false,
+                'message'         => 'Migration failed: ' . $e->getMessage(),
+                'rows_backfilled' => 0,
+            ];
+        }
+    }
+
+    /**
      * Convenience: run a SELECT query and return all rows.
      *
      * @throws \PDOException on failure.
