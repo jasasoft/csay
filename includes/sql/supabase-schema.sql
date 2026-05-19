@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS cleversay_chunks (
     -- to a particular source.
     source_id         BIGINT NOT NULL,
 
+    -- v4.41.0+: namespace for source_id, since source_id by itself maps
+    -- into two distinct MySQL primary key spaces (cleversay_sources.id
+    -- for chunks, cleversay_knowledge.id for KB entries). Without this
+    -- column, diagnostic queries like "WHERE source_id = 222" return
+    -- mixed unrelated rows. Values: 'source' for chunks, 'kb' for KB
+    -- entries. Always scope by (content_type, source_namespace) to keep
+    -- ID spaces disjoint. See Bug 4 in the v4.41.0 handoff brief.
+    source_namespace  TEXT,
+
     -- sha256 hex of chunk_text. Used for dedup and unchanged-content detection.
     chunk_hash        VARCHAR(64) NOT NULL,
 
@@ -149,6 +158,14 @@ CREATE INDEX IF NOT EXISTS cleversay_chunks_source_idx
 -- whether a piece of content already has an embedding row.
 CREATE INDEX IF NOT EXISTS cleversay_chunks_content_idx
     ON cleversay_chunks (tenant_id, content_type, content_id);
+
+-- v4.41.0+: namespace-scoped retrieval index. The hot retrieval path
+-- filters by (tenant_id, is_current, source_namespace='source') for
+-- chunks, so adding source_namespace to this composite makes the
+-- planner happier. See Bug 4 in the v4.41.0 handoff brief.
+CREATE INDEX IF NOT EXISTS cleversay_chunks_namespace_idx
+    ON cleversay_chunks (tenant_id, source_namespace, is_current)
+    WHERE is_current = TRUE;
 
 -- is_current index. Retrieval queries always filter on is_current=TRUE.
 -- Combined with tenant_id this is the hot path.
