@@ -710,7 +710,17 @@ if ($track_usage_enabled) {
                 document.getElementById('cs-source-file').value = '';
                 addRow(r.data.source);
             } else {
+                // v4.42.30+: When the server reports an indexing failure
+                // (file uploaded successfully but text extraction broke),
+                // it sends back the source row alongside the error
+                // message. Add the row to the table so the admin can
+                // see the failed entry at the top with its error
+                // indicator — not just a toast that disappears.
                 showNotice(r.data?.message || 'Upload error.', 'error');
+                if (r.data?.source) {
+                    document.getElementById('cs-source-file').value = '';
+                    addRow(r.data.source);
+                }
             }
         }).always(() => {
             $spinner.hide();

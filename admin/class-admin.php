@@ -44,9 +44,22 @@ class Admin {
         add_action('admin_init', [$this, 'handle_token_regenerate']);
         add_action('admin_init', [$this, 'handle_import_upload']);
         add_action('admin_init', [$this, 'handle_synonym_form']);
+        // v4.42.0+: bulk test CSV upload runs on admin_init so we can
+        // redirect cleanly after creating the run. Doing the upload
+        // inside render_bulk_test() (which fires during page render)
+        // means WordPress has already flushed the admin page header by
+        // the time we'd call wp_redirect(), causing a "headers already
+        // sent" warning.
+        add_action('admin_init', [$this, 'handle_bulk_test_upload_init']);
         add_action('admin_init', [$this, 'handle_inquiry_actions']);
         add_action('admin_init', [$this, 'handle_export_download']);
         add_action('admin_init', [$this, 'handle_inspector_actions']);
+
+        // v4.41.0+: Per-site embeddings admin actions (Backfill, Process Queue,
+        // Retry Failed, Save Settings). Moved out of network admin so the
+        // current blog context is correct by construction. See Bugs 1, 2, 5
+        // in the v4.41.0 handoff brief.
+        add_action('admin_init', [$this, 'handle_site_embeddings_actions']);
         
         // Admin post handlers
         add_action('admin_post_cleversay_save_keyword', [$this, 'handle_save_keyword']);
@@ -60,6 +73,10 @@ class Admin {
         add_action('wp_ajax_cleversay_run_eval', [$this, 'ajax_run_eval']);
         add_action('wp_ajax_cleversay_save_eval_run', [$this, 'ajax_save_eval_run']);
         add_action('wp_ajax_cleversay_delete_eval_run', [$this, 'ajax_delete_eval_run']);
+        // v4.42.0+: bulk question testing (super-admin only).
+        add_action('wp_ajax_cleversay_bulk_test_process',  [$this, 'ajax_bulk_test_process']);
+        add_action('wp_ajax_cleversay_bulk_test_abort',    [$this, 'ajax_bulk_test_abort']);
+        add_action('wp_ajax_cleversay_bulk_test_download', [$this, 'ajax_bulk_test_download']);
         
         // AJAX handlers for admin
         add_action('wp_ajax_cleversay_save_entry', [$this, 'ajax_save_entry']);
@@ -119,6 +136,10 @@ class Admin {
         add_action('wp_ajax_cleversay_polish_diagnose',           [$this, 'ajax_polish_diagnose']);
         add_action('wp_ajax_cleversay_reuse_repair_apply',        [$this, 'ajax_reuse_repair_apply']);
         add_action('wp_ajax_cleversay_ai_suggest_variations',     [$this, 'ajax_ai_suggest_variations']);
+        // v4.42.25+: Reset Test Data — wipes test data on the current
+        // tenant blog. Super-admin only; protected by nonce + confirmation
+        // string entered by the user.
+        add_action('wp_ajax_cleversay_reset_test_data',           [$this, 'ajax_reset_test_data']);
     }
     
     /**
@@ -193,14 +214,64 @@ class Admin {
         );
 
         // Inquiries
+        // v4.42.27+: menu title carries a count badge for pending inquiries,
+        // mirroring the AI Answers pattern. Counts status='pending' rows
+        // globally (not per-admin) — pending means "needs a response from
+        // staff," which is a shared queue, so every admin should see the
+        // same number.
         add_submenu_page(
             'cleversay',
             __('Inquiries', 'cleversay'),
-            __('Inquiries', 'cleversay'),
+            $this->get_inquiries_menu_label(),
             'manage_options',
             'cleversay-inquiries',
             [$this, 'render_inquiries']
         );
+
+        // v4.42.19+: CleverSay Tools — separate top-level menu for power-user
+        // operator tools (debug log, latency dashboard, AI inspector, bulk
+        // test, eval, etc.). Keeping these out of the main CleverSay menu
+        // makes the regular admin menu shorter and signals which items
+        // are day-to-day vs which are diagnostic. Super-admin only:
+        // clients on multisite never see this top-level entry, and any
+        // tool that previously had its own !$is_client guard is now
+        // also implicitly guarded by the parent menu's permission.
+        //
+        // URL slugs for individual tools are unchanged (e.g.
+        // cleversay-debug-log stays cleversay-debug-log), so existing
+        // bookmarks and inbound links continue working.
+        //
+        // v4.42.20+: position string '30.1' instead of integer 31.
+        // WordPress sorts top-level menus by numeric position, and
+        // other plugins commonly register at integer positions in
+        // the 25–58 range. Using '30.1' as a string guarantees this
+        // menu lands immediately after CleverSay (position 30) and
+        // before any plugin at position 31+. Passing the value as a
+        // string preserves the fractional part — PHP would otherwise
+        // cast a float to int and lose the decimal. Established
+        // pattern (WooCommerce uses '55.5' for the same reason).
+        if (is_super_admin()) {
+            add_menu_page(
+                __('CleverSay Tools', 'cleversay'),
+                __('CleverSay Tools', 'cleversay'),
+                'manage_options',
+                'cs-tools',
+                [$this, 'render_cs_tools_landing'],
+                'dashicons-admin-tools',
+                '30.1'  // docks immediately after CleverSay (position 30)
+            );
+            // Landing page submenu entry (matches the parent slug so
+            // clicking the top-level item lands here rather than
+            // auto-redirecting to the first child).
+            add_submenu_page(
+                'cs-tools',
+                __('CleverSay Tools', 'cleversay'),
+                __('Overview', 'cleversay'),
+                'manage_options',
+                'cs-tools',
+                [$this, 'render_cs_tools_landing']
+            );
+        }
 
         // Settings — clients see a limited version (no AI tab, no Advanced tab)
         add_submenu_page(
@@ -211,6 +282,53 @@ class Admin {
             'cleversay-settings',
             [$this, 'render_settings']
         );
+
+        // v4.41.0+: Per-site Embeddings admin. Visible only when the
+        // network's embeddings feature flag is on (no point showing
+        // status for a feature that isn't running). Status panel and
+        // action buttons run in this site's blog context — see Bugs 1, 2
+        // in the v4.41.0 handoff brief.
+        if (class_exists('\\CleverSay\\Supabase') && \CleverSay\Supabase::is_enabled()) {
+            add_submenu_page(
+                'cleversay',
+                __('Embeddings', 'cleversay'),
+                __('Embeddings', 'cleversay'),
+                'manage_options',
+                'cleversay-embeddings',
+                [$this, 'render_site_embeddings']
+            );
+        }
+
+        // v4.41.5+: Per-site Latency dashboard. Always visible — even
+        // sites without hybrid retrieval enabled produce request_metrics
+        // rows for the Layer 1 / synthesis stages, and the dashboard is
+        // useful for baselining before any optimization work.
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Latency', 'cleversay'),
+                __('Latency', 'cleversay'),
+                'manage_options',
+                'cleversay-latency',
+                [$this, 'render_latency']
+            );
+        }
+
+        // v4.42.0+: Per-site Bulk Question Test admin. Pre-deployment
+        // qualification tool — operator uploads CSV of student questions
+        // and reviews the answers offline before going live with AI on
+        // this tenant. Super-admin only because it's a power tool that
+        // can rack up real API costs and isn't meant for client staff.
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Bulk Test', 'cleversay'),
+                __('Bulk Test', 'cleversay'),
+                'manage_options',
+                'cleversay-bulk-test',
+                [$this, 'render_bulk_test']
+            );
+        }
 
         // AI Answers review — clients can see this (review AI responses)
         add_submenu_page(
@@ -226,14 +344,16 @@ class Admin {
         // validation events. Admins use this to see how often AI is
         // intervening, which entries are getting rejected, and which
         // ties are being resolved. Visible to clients (their own data).
-        add_submenu_page(
-            'cleversay',
-            __('AI Decisions', 'cleversay'),
-            __('AI Decisions', 'cleversay'),
-            'manage_options',
-            'cleversay-ai-decisions',
-            [$this, 'render_ai_decisions']
-        );
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('AI Decisions', 'cleversay'),
+                __('AI Decisions', 'cleversay'),
+                'manage_options',
+                'cleversay-ai-decisions',
+                [$this, 'render_ai_decisions']
+            );
+        }
 
         // AI Sources — hidden from clients in Multisite (managed at network level)
         if (!$is_client) {
@@ -255,14 +375,53 @@ class Admin {
         // (no menu entry) so any admin who knows the URL can run it.
         // Keeping behind manage_options is sufficient — same level
         // as the rest of the plugin's admin views.
-        add_submenu_page(
-            'cleversay',
-            __('Snippet Diagnostic', 'cleversay'),
-            __('Snippet Diagnostic', 'cleversay'),
-            'manage_options',
-            'cleversay-snippet-diag',
-            [$this, 'render_snippet_diagnostic']
-        );
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Snippet Diagnostic', 'cleversay'),
+                __('Snippet Diagnostic', 'cleversay'),
+                'manage_options',
+                'cleversay-snippet-diag',
+                [$this, 'render_snippet_diagnostic']
+            );
+        }
+
+        // v4.42.23+: Parsedown Status — verify the optional Parsedown
+        // markdown library is installed and being used by the runtime
+        // markdown converter. Shows file presence, class detection,
+        // detected version, and a live render test. Useful both as
+        // initial verification after dropping Parsedown.php into
+        // includes/lib/ and as ongoing diagnostic if formatting ever
+        // looks off in production.
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Parsedown Status', 'cleversay'),
+                __('Parsedown Status', 'cleversay'),
+                'manage_options',
+                'cleversay-parsedown-status',
+                [$this, 'render_parsedown_status']
+            );
+        }
+
+        // v4.42.25+: Reset Test Data — wipes traffic / observability /
+        // testing data on the CURRENT tenant blog only, leaving KB content
+        // and operational tables (knowledge, variations, categories,
+        // synonyms, sources, chunks, embedding queue) untouched. Useful
+        // during the qualification phase when admins accumulate test
+        // questions and want to start clean before going live. Per-blog
+        // scope means it's safe to run on a test tenant without affecting
+        // other tenants already in production.
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Reset Test Data', 'cleversay'),
+                __('Reset Test Data', 'cleversay'),
+                'manage_options',
+                'cleversay-reset-test-data',
+                [$this, 'render_reset_test_data']
+            );
+        }
 
         // Reports
         add_submenu_page(
@@ -296,10 +455,17 @@ class Admin {
         );
 
         // Captured leads from pre-chat lead-capture form
+        // v4.42.27+: per-admin "new since last viewed" badge. Unlike
+        // Inquiries (status-based, globally shared), Leads has no
+        // status column — leads are captures, not work items. The
+        // useful signal is "did anything new come in since I last
+        // looked?" That's tracked via a per-user user_meta timestamp
+        // updated when this admin opens the Leads page. Each admin
+        // gets their own counter; clearing one doesn't affect others.
         add_submenu_page(
             'cleversay',
             __('Leads', 'cleversay'),
-            __('Leads', 'cleversay'),
+            $this->get_leads_menu_label(),
             'manage_options',
             'cleversay-leads',
             [$this, 'render_leads']
@@ -307,14 +473,16 @@ class Admin {
 
         // AI A/B Test harness — run a fixed question set against the current
         // model, save results, compare across model switches over time.
-        add_submenu_page(
-            'cleversay',
-            __('A/B Test', 'cleversay'),
-            __('A/B Test', 'cleversay'),
-            'manage_options',
-            'cleversay-ab-test',
-            [$this, 'render_ab_test']
-        );
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('A/B Test', 'cleversay'),
+                __('A/B Test', 'cleversay'),
+                'manage_options',
+                'cleversay-ab-test',
+                [$this, 'render_ab_test']
+            );
+        }
 
         // Eval Harness — runs every variation in the KB through the
         // matcher to measure recall@1: did each variation match its
@@ -322,21 +490,23 @@ class Admin {
         // patterns or add variations. Different from A/B Test (which
         // compares AI models on a fixed question list with no ground
         // truth) — this has ground truth from the variations table.
-        add_submenu_page(
-            'cleversay',
-            __('Eval', 'cleversay'),
-            __('Eval', 'cleversay'),
-            'manage_options',
-            'cleversay-eval',
-            [$this, 'render_eval']
-        );
+        if (is_super_admin()) {
+            add_submenu_page(
+                'cs-tools',
+                __('Eval', 'cleversay'),
+                __('Eval', 'cleversay'),
+                'manage_options',
+                'cleversay-eval',
+                [$this, 'render_eval']
+            );
+        }
 
         // AI Inspector — diagnostic view of the exact prompt, retrieved
         // chunks, history, and raw response for AI calls. Super-admin only
         // on multisite (prompt internals are not for clients).
-        if (!$is_client) {
+        if (is_super_admin()) {
             add_submenu_page(
-                'cleversay',
+                'cs-tools',
                 __('AI Inspector', 'cleversay'),
                 __('AI Inspector', 'cleversay'),
                 'manage_options',
@@ -359,9 +529,9 @@ class Admin {
         // groups would migrate cleanly to the variations system and which
         // need attention. Read-only; writes nothing. Phase A of the
         // legacy-removal project. Hidden from clients (operator tool).
-        if (!$is_client) {
+        if (is_super_admin()) {
             add_submenu_page(
-                'cleversay',
+                'cs-tools',
                 __('Migration Analysis', 'cleversay'),
                 __('Migration Analysis', 'cleversay'),
                 'manage_options',
@@ -377,9 +547,9 @@ class Admin {
         // qualifying-determiner boost, soft-pair fallback, etc).
         // Dry-run-only by default; admin reviews report and
         // explicitly clicks Apply to write changes.
-        if (!$is_client) {
+        if (is_super_admin()) {
             add_submenu_page(
-                'cleversay',
+                'cs-tools',
                 __('Recompile Patterns', 'cleversay'),
                 __('Recompile Patterns', 'cleversay'),
                 'manage_options',
@@ -393,9 +563,9 @@ class Admin {
         // pre-cascade pattern edits) and lets admin auto-repair
         // when a clear winner exists or manually pick a target
         // when ambiguous.
-        if (!$is_client) {
+        if (is_super_admin()) {
             add_submenu_page(
-                'cleversay',
+                'cs-tools',
                 __('Reuse Repair', 'cleversay'),
                 __('Reuse Repair', 'cleversay'),
                 'manage_options',
@@ -405,9 +575,9 @@ class Admin {
         }
 
         // Debug Log — hidden from clients
-        if (!$is_client) {
+        if (is_super_admin()) {
             add_submenu_page(
-                'cleversay',
+                'cs-tools',
                 __('Debug Log', 'cleversay'),
                 __('Debug Log', 'cleversay'),
                 'manage_options',
@@ -587,6 +757,664 @@ class Admin {
         register_setting('cleversay_settings', 'cleversay_delete_data_on_uninstall');
     }
     
+    /**
+     * Render the CS Tools landing page. Lists each tool with a one-line
+     * description and a link. Shown when a super-admin clicks the top-
+     * level "CS Tools" menu item without picking a specific tool.
+     *
+     * Kept inline (rather than a separate view file) because it's a
+     * trivial index page — no forms, no AJAX, no shared template logic.
+     *
+     * @since 4.42.19
+     */
+    public function render_cs_tools_landing(): void {
+        // Defensive: this method is only registered for super-admins,
+        // but check anyway in case it's reached via direct URL with
+        // weakened capability.
+        if (!is_super_admin()) {
+            wp_die(__('Permission denied.', 'cleversay'));
+        }
+
+        // Each entry: [slug, label, description]. Order roughly groups
+        // related tools together (debug/observability first, testing
+        // tools, then KB maintenance utilities).
+        $tools = [
+            ['cleversay-debug-log',     __('Debug Log', 'cleversay'),
+                __('Plugin-side logs. Per-request traces of search, retrieval, synthesis, and error events.', 'cleversay')],
+            ['cleversay-latency',       __('Latency', 'cleversay'),
+                __('Per-stage timing breakdown across recent requests. Use to spot slow paths.', 'cleversay')],
+            ['cleversay-ai-inspector',  __('AI Inspector', 'cleversay'),
+                __('Captured prompt, retrieved chunks, conversation history, and raw response for AI calls.', 'cleversay')],
+            ['cleversay-ai-decisions',  __('AI Decisions', 'cleversay'),
+                __('Observability for KB validator and tiebreak decisions — what was accepted, rejected, and why.', 'cleversay')],
+            ['cleversay-ab-test',       __('A/B Test', 'cleversay'),
+                __('Run a fixed question set through the current model. Save results to compare across model switches.', 'cleversay')],
+            ['cleversay-bulk-test',     __('Bulk Test', 'cleversay'),
+                __('Upload a CSV of student questions and review answers offline before going live.', 'cleversay')],
+            ['cleversay-eval',          __('Eval', 'cleversay'),
+                __('Run every KB variation through the matcher and measure recall. Surfaces patterns that miss their own variations.', 'cleversay')],
+            ['cleversay-recompile',     __('Recompile Patterns', 'cleversay'),
+                __('Re-run the pattern compiler over the KB. Catches entries with stale patterns from earlier compiler logic.', 'cleversay')],
+            ['cleversay-reuse-repair',  __('Reuse Repair', 'cleversay'),
+                __('Find Reuse Response references whose target pattern no longer exists and auto-repair or manually retarget.', 'cleversay')],
+            ['cleversay-snippet-diag',  __('Snippet Diagnostic', 'cleversay'),
+                __('Diagnose widget embed snippet issues — verifies the script loads, token resolves, and config returns.', 'cleversay')],
+            ['cleversay-parsedown-status', __('Parsedown Status', 'cleversay'),
+                __('Verify the Parsedown markdown library is installed and being used by the runtime converter. Live render test included.', 'cleversay')],
+            ['cleversay-reset-test-data', __('Reset Test Data', 'cleversay'),
+                __('Wipe accumulated traffic, ratings, AI captures, and form submissions for THIS tenant blog. Leaves KB content and operational data untouched.', 'cleversay')],
+            ['cleversay-migration',     __('Migration Analysis', 'cleversay'),
+                __('Dry-run report showing which legacy phrase groups will migrate cleanly to the variations system.', 'cleversay')],
+        ];
+        ?>
+        <div class="wrap cleversay-admin">
+            <h1><?php esc_html_e('CleverSay Tools', 'cleversay'); ?></h1>
+            <p style="max-width: 720px;">
+                <?php esc_html_e('Operator and diagnostic tools. These are super-admin only and not visible to client site administrators.', 'cleversay'); ?>
+            </p>
+
+            <table class="widefat striped" style="max-width: 980px; margin-top: 16px;">
+                <thead>
+                    <tr>
+                        <th style="width: 200px;"><?php esc_html_e('Tool', 'cleversay'); ?></th>
+                        <th><?php esc_html_e('Description', 'cleversay'); ?></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($tools as [$slug, $label, $desc]): ?>
+                        <tr>
+                            <td>
+                                <strong>
+                                    <a href="<?php echo esc_url(admin_url('admin.php?page=' . $slug)); ?>">
+                                        <?php echo esc_html($label); ?>
+                                    </a>
+                                </strong>
+                            </td>
+                            <td><?php echo esc_html($desc); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    /**
+     * Parsedown status diagnostic page. Verifies whether the optional
+     * Parsedown markdown library is installed at its expected path and
+     * being detected by the runtime converter.
+     *
+     * Shows four things:
+     *   1. File presence at includes/lib/Parsedown.php
+     *   2. Whether `class_exists('Parsedown')` resolves
+     *   3. The detected version (from Parsedown::version constant)
+     *   4. A live render test — feeds sample markdown to the converter
+     *      and shows both the raw text and the rendered HTML side by
+     *      side, so you can confirm bullets/bold/links actually convert.
+     *
+     * @since 4.42.23
+     */
+    public function render_parsedown_status(): void {
+        if (!is_super_admin()) {
+            wp_die(__('Permission denied.', 'cleversay'));
+        }
+
+        // 1. File presence check.
+        $parsedown_path = CLEVERSAY_PLUGIN_DIR . 'includes/lib/Parsedown.php';
+        $file_exists    = file_exists($parsedown_path);
+        $file_readable  = $file_exists && is_readable($parsedown_path);
+        $file_size      = $file_exists ? filesize($parsedown_path) : 0;
+
+        // 2. Class detection — trigger the same require_once the
+        //    converter does, so we report what the converter actually sees.
+        if (!class_exists('Parsedown') && $file_readable) {
+            // Suppress any noise the include might produce.
+            // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions
+            @require_once $parsedown_path;
+        }
+        $class_loaded = class_exists('Parsedown');
+
+        // 3. Version (only if the class actually loaded).
+        $version = 'unknown';
+        if ($class_loaded && defined('\\Parsedown::version')) {
+            $version = (string) constant('\\Parsedown::version');
+        }
+
+        // 4. Live render test — feed the runtime converter the kind of
+        //    markdown the model typically produces and show the result.
+        $sample_markdown =
+            "Here are the key things to remember:\n" .
+            "\n" .
+            "- First step: **review your transcript**\n" .
+            "- Second step: confirm your address in [our system](https://example.com/students)\n" .
+            "- Third step: submit the form\n" .
+            "\n" .
+            "Need help? Contact us at **registrar@example.edu**.";
+
+        // Run the same converter the runtime uses.
+        $rendered_html = \CleverSay\AI::convert_minimal_markdown_to_html($sample_markdown);
+
+        // Identify which path the converter took by inspecting output
+        // structure. If we see <ul> or <li> tags, Parsedown rendered it
+        // (the legacy fallback doesn't handle bullets). Otherwise the
+        // legacy whitelist converter ran.
+        $rendered_with = (stripos($rendered_html, '<ul>') !== false || stripos($rendered_html, '<li>') !== false)
+            ? 'parsedown'
+            : 'legacy_whitelist';
+
+        // Overall status — green if Parsedown is installed and rendering
+        // works; yellow if file is missing (legacy fallback in use,
+        // plugin still functional); red if file exists but class can't
+        // load (something is broken).
+        if ($class_loaded && $rendered_with === 'parsedown') {
+            $status_label = '✅ Parsedown installed and active';
+            $status_color = '#0a7d2c';
+        } elseif (!$file_exists) {
+            $status_label = '⚠️ Parsedown not installed — legacy whitelist in use';
+            $status_color = '#a06800';
+        } elseif (!$class_loaded) {
+            $status_label = '❌ File present but class won\'t load';
+            $status_color = '#a00';
+        } else {
+            $status_label = '⚠️ Class loaded but live test didn\'t use it';
+            $status_color = '#a06800';
+        }
+        ?>
+        <div class="wrap cleversay-admin">
+            <h1><?php esc_html_e('Parsedown Status', 'cleversay'); ?></h1>
+
+            <div style="background: #fff; border-left: 4px solid <?php echo esc_attr($status_color); ?>;
+                        padding: 14px 18px; margin: 16px 0; font-size: 15px;">
+                <strong><?php echo esc_html($status_label); ?></strong>
+            </div>
+
+            <h2><?php esc_html_e('Detection Details', 'cleversay'); ?></h2>
+            <table class="widefat striped" style="max-width: 760px;">
+                <tbody>
+                    <tr>
+                        <th style="width: 240px;"><?php esc_html_e('Expected path', 'cleversay'); ?></th>
+                        <td><code><?php echo esc_html($parsedown_path); ?></code></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('File present', 'cleversay'); ?></th>
+                        <td><?php echo $file_exists ? '✅ yes' : '❌ no — install it (see README in includes/lib/)'; ?></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('File readable', 'cleversay'); ?></th>
+                        <td><?php echo $file_readable ? '✅ yes' : ($file_exists ? '❌ no — check file permissions' : 'n/a'); ?></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('File size', 'cleversay'); ?></th>
+                        <td>
+                            <?php if ($file_exists): ?>
+                                <?php echo esc_html(number_format($file_size)); ?> bytes
+                                <?php if ($file_size < 30000 || $file_size > 70000): ?>
+                                    <span style="color:#a06800;">
+                                        ⚠️ unusual size; expected ~42KB for Parsedown 1.7.4
+                                    </span>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                n/a
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Parsedown class loaded', 'cleversay'); ?></th>
+                        <td><?php echo $class_loaded ? '✅ yes' : '❌ no'; ?></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Detected version', 'cleversay'); ?></th>
+                        <td>
+                            <?php echo esc_html($version); ?>
+                            <?php if ($class_loaded && $version !== '1.7.4'): ?>
+                                <span style="color:#a06800;">
+                                    ⚠️ expected 1.7.4 — newer/older versions may behave differently
+                                </span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Live test rendered with', 'cleversay'); ?></th>
+                        <td>
+                            <?php if ($rendered_with === 'parsedown'): ?>
+                                ✅ Parsedown (bullets detected in output)
+                            <?php else: ?>
+                                ⚠️ legacy whitelist (no bullets in output — Parsedown isn't running)
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top: 28px;"><?php esc_html_e('Live Render Test', 'cleversay'); ?></h2>
+            <p style="max-width: 760px;">
+                <?php esc_html_e('The converter was fed the sample markdown below and produced the HTML output shown. With Parsedown active, you should see actual bullet points, a clickable link, and bold text. Without it, you\'ll see the raw markdown markers.', 'cleversay'); ?>
+            </p>
+
+            <div style="display: flex; gap: 16px; flex-wrap: wrap; max-width: 1100px;">
+                <div style="flex: 1; min-width: 320px;">
+                    <h3><?php esc_html_e('Sample Markdown (input)', 'cleversay'); ?></h3>
+                    <pre style="background: #f6f7f7; border: 1px solid #c3c4c7; padding: 12px;
+                                font-family: Consolas, Monaco, monospace; font-size: 13px;
+                                white-space: pre-wrap; line-height: 1.5;"><?php
+                        echo esc_html($sample_markdown);
+                    ?></pre>
+                </div>
+
+                <div style="flex: 1; min-width: 320px;">
+                    <h3><?php esc_html_e('Rendered HTML (output)', 'cleversay'); ?></h3>
+                    <div style="background: #fff; border: 1px solid #c3c4c7; padding: 12px;
+                                font-size: 14px; line-height: 1.6;">
+                        <?php
+                        // Display the rendered HTML as it would appear to a
+                        // user. Trust comes from the converter's own safe-mode
+                        // setting, but use wp_kses to defense-in-depth strip
+                        // anything outside our expected tag set.
+                        $allowed = [
+                            'a'      => ['href' => [], 'target' => [], 'rel' => [], 'title' => []],
+                            'strong' => [],
+                            'em'     => [],
+                            'b'      => [],
+                            'i'      => [],
+                            'ul'     => [],
+                            'ol'     => [],
+                            'li'     => [],
+                            'p'      => [],
+                            'br'     => [],
+                            'h1'     => [],
+                            'h2'     => [],
+                            'h3'     => [],
+                            'h4'     => [],
+                            'h5'     => [],
+                            'h6'     => [],
+                            'blockquote' => [],
+                            'code'   => [],
+                            'pre'    => [],
+                        ];
+                        echo wp_kses($rendered_html, $allowed);
+                        ?>
+                    </div>
+
+                    <h3 style="margin-top: 14px;"><?php esc_html_e('Rendered HTML (source)', 'cleversay'); ?></h3>
+                    <pre style="background: #f6f7f7; border: 1px solid #c3c4c7; padding: 12px;
+                                font-family: Consolas, Monaco, monospace; font-size: 12px;
+                                white-space: pre-wrap; line-height: 1.5;"><?php
+                        echo esc_html($rendered_html);
+                    ?></pre>
+                </div>
+            </div>
+
+            <?php if (!$file_exists): ?>
+                <h2 style="margin-top: 28px;"><?php esc_html_e('Installation', 'cleversay'); ?></h2>
+                <p style="max-width: 760px;">
+                    <?php
+                    printf(
+                        /* translators: 1: file path */
+                        esc_html__('Download Parsedown 1.7.4 (a single PHP file, MIT licensed) and save it to %s. The converter will pick it up automatically — no settings to change, no restart needed.', 'cleversay'),
+                        '<code>' . esc_html($parsedown_path) . '</code>'
+                    );
+                    ?>
+                </p>
+                <p>
+                    <a href="https://raw.githubusercontent.com/erusev/parsedown/1.7.4/Parsedown.php"
+                       target="_blank" rel="noopener noreferrer" class="button button-primary">
+                        <?php esc_html_e('Download Parsedown 1.7.4', 'cleversay'); ?>
+                    </a>
+                    <a href="https://github.com/erusev/parsedown/releases/tag/1.7.4"
+                       target="_blank" rel="noopener noreferrer" class="button">
+                        <?php esc_html_e('View release on GitHub', 'cleversay'); ?>
+                    </a>
+                </p>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    // ── Reset Test Data ──────────────────────────────────────────────────────
+
+    /**
+     * Tables that get wiped by the Reset Test Data tool. Organized into
+     * three groups so the UI can present each independently and the
+     * wipe logic can be explicit about scope.
+     *
+     * The "always" group is data that's clearly testing/observability
+     * and contains nothing of business value — wiping these is
+     * always safe.
+     *
+     * The "forms" group is user-submitted contact info. During
+     * qualification testing it's all fake; in production it's real
+     * leads. Separated so admins explicitly opt in.
+     *
+     * KB content, variations, categories, synonyms, sources, chunks,
+     * and the embedding queue are NEVER touched by this tool.
+     *
+     * @since 4.42.25
+     */
+    private function get_reset_test_data_groups(): array {
+        global $wpdb;
+        $prefix = $wpdb->prefix;
+
+        return [
+            'always' => [
+                'label'       => __('Traffic, ratings, AI captures, metrics', 'cleversay'),
+                'description' => __('Question logs, visitor sessions, ratings, AI fallback answers, citations, source usage stats, AI Inspector captures, request timing metrics, bulk test history.', 'cleversay'),
+                'tables'      => [
+                    'questions'             => $prefix . 'cleversay_questions',
+                    'visitors'              => $prefix . 'cleversay_visitors',
+                    'ratings'               => $prefix . 'cleversay_ratings',
+                    'conversation_ratings'  => $prefix . 'cleversay_conversation_ratings',
+                    'ai_answers'            => $prefix . 'cleversay_ai_answers',
+                    'ai_answer_sources'     => $prefix . 'cleversay_ai_answer_sources',
+                    'source_usage'          => $prefix . 'cleversay_source_usage',
+                    'ai_debug_log'          => $prefix . 'cleversay_ai_debug_log',
+                    'request_metrics'       => $prefix . 'cleversay_request_metrics',
+                    'bulk_test_runs'        => $prefix . 'cleversay_bulk_test_runs',
+                    'bulk_test_results'     => $prefix . 'cleversay_bulk_test_results',
+                ],
+            ],
+            'forms' => [
+                'label'       => __('Form submissions (Inquiries + Leads)', 'cleversay'),
+                'description' => __('User-submitted contact information from chat forms. Wipe only if all current data is test data — real customer submissions would be lost.', 'cleversay'),
+                'tables'      => [
+                    'inquiries' => $prefix . 'cleversay_inquiries',
+                    'leads'     => $prefix . 'cleversay_leads',
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Count rows in each table for the pre-wipe display. Uses a single
+     * pass with a defensive existence check so missing tables (which
+     * can happen on partial migrations) are reported as 0 rather than
+     * triggering SQL errors.
+     *
+     * @since 4.42.25
+     * @param array $tables map of label => table name
+     * @return array map of label => integer row count
+     */
+    private function count_reset_test_data_rows(array $tables): array {
+        global $wpdb;
+        $counts = [];
+        foreach ($tables as $label => $table) {
+            // Defensive: confirm table exists before counting. The
+            // SHOW TABLES check is cheap and avoids producing errors
+            // in the WP debug log on installs where a table is missing.
+            $exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+            if ($exists === '') {
+                $counts[$label] = ['exists' => false, 'rows' => 0, 'table' => $table];
+                continue;
+            }
+            $rows = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+            $counts[$label] = ['exists' => true, 'rows' => $rows, 'table' => $table];
+        }
+        return $counts;
+    }
+
+    /**
+     * Render the Reset Test Data admin page. Shows current row counts
+     * per group, the explicit list of tables that will be wiped, and
+     * a confirmation form. The actual wipe goes through the AJAX
+     * handler (ajax_reset_test_data) so the page can show a friendly
+     * progress + result without a full page reload.
+     *
+     * @since 4.42.25
+     */
+    public function render_reset_test_data(): void {
+        if (!is_super_admin()) {
+            wp_die(__('Permission denied.', 'cleversay'));
+        }
+
+        $groups   = $this->get_reset_test_data_groups();
+        $blog_id  = function_exists('get_current_blog_id') ? get_current_blog_id() : 1;
+        $site_url = home_url();
+        $nonce    = wp_create_nonce('cleversay_reset_test_data');
+        ?>
+        <div class="wrap cleversay-admin">
+            <h1><?php esc_html_e('Reset Test Data', 'cleversay'); ?></h1>
+
+            <div style="background:#fff3cd; border-left:4px solid #f0a020; padding:14px 18px; margin:16px 0; max-width:860px;">
+                <strong><?php esc_html_e('This action is permanent.', 'cleversay'); ?></strong><br>
+                <?php
+                printf(
+                    /* translators: 1: blog ID, 2: site URL */
+                    esc_html__('Affects only blog #%1$d (%2$s). KB entries, variations, categories, synonyms, sources, embedded chunks, and the embedding queue are NOT touched.', 'cleversay'),
+                    (int) $blog_id,
+                    esc_html($site_url)
+                );
+                ?>
+            </div>
+
+            <form id="cs-reset-form" method="post" onsubmit="return false;">
+                <?php foreach ($groups as $group_key => $group): ?>
+                    <?php $counts = $this->count_reset_test_data_rows($group['tables']); ?>
+                    <h2 style="margin-top:24px;">
+                        <label>
+                            <input type="checkbox" class="cs-reset-group"
+                                   name="groups[]"
+                                   value="<?php echo esc_attr($group_key); ?>"
+                                   <?php echo $group_key === 'always' ? 'checked' : ''; ?>>
+                            <?php echo esc_html($group['label']); ?>
+                        </label>
+                    </h2>
+                    <p style="margin:6px 0 12px 24px; max-width:780px; color:#646970;">
+                        <?php echo esc_html($group['description']); ?>
+                    </p>
+                    <table class="widefat striped" style="max-width:780px; margin-left:24px;">
+                        <thead>
+                            <tr>
+                                <th style="width:60%;"><?php esc_html_e('Table', 'cleversay'); ?></th>
+                                <th><?php esc_html_e('Current Rows', 'cleversay'); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($counts as $label => $info): ?>
+                            <tr>
+                                <td><code><?php echo esc_html($info['table']); ?></code></td>
+                                <td>
+                                    <?php if (!$info['exists']): ?>
+                                        <span style="color:#9ca3af;"><?php esc_html_e('(table missing — skipped)', 'cleversay'); ?></span>
+                                    <?php else: ?>
+                                        <?php echo esc_html(number_format($info['rows'])); ?>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endforeach; ?>
+
+                <h2 style="margin-top:32px;"><?php esc_html_e('Confirmation', 'cleversay'); ?></h2>
+                <p style="max-width:780px;">
+                    <?php esc_html_e('Type DELETE in the box below to enable the button. This prevents accidental clicks.', 'cleversay'); ?>
+                </p>
+                <p>
+                    <input type="text" id="cs-reset-confirm"
+                           placeholder="<?php esc_attr_e('Type DELETE here', 'cleversay'); ?>"
+                           autocomplete="off" spellcheck="false"
+                           style="font-family:monospace; width:260px;">
+                </p>
+                <p>
+                    <button type="button" id="cs-reset-run" class="button button-primary"
+                            disabled
+                            style="background:#a00; border-color:#a00;">
+                        <?php esc_html_e('Reset Selected Test Data', 'cleversay'); ?>
+                    </button>
+                </p>
+                <div id="cs-reset-result" style="margin-top:18px;"></div>
+            </form>
+        </div>
+
+        <script>
+        (function(){
+            var confirmInput = document.getElementById('cs-reset-confirm');
+            var runBtn       = document.getElementById('cs-reset-run');
+            var resultBox    = document.getElementById('cs-reset-result');
+            confirmInput.addEventListener('input', function(){
+                runBtn.disabled = confirmInput.value.trim() !== 'DELETE';
+            });
+            runBtn.addEventListener('click', function(){
+                if (confirmInput.value.trim() !== 'DELETE') return;
+                var groups = Array.prototype.map.call(
+                    document.querySelectorAll('.cs-reset-group:checked'),
+                    function(el){ return el.value; }
+                );
+                if (groups.length === 0) {
+                    resultBox.innerHTML = '<div class="notice notice-warning" style="padding:8px 12px;"><?php echo esc_js(__('Select at least one group to wipe.', 'cleversay')); ?></div>';
+                    return;
+                }
+                runBtn.disabled = true;
+                runBtn.textContent = '<?php echo esc_js(__('Running…', 'cleversay')); ?>';
+                resultBox.innerHTML = '';
+                var fd = new FormData();
+                fd.append('action', 'cleversay_reset_test_data');
+                fd.append('_wpnonce', '<?php echo esc_js($nonce); ?>');
+                fd.append('confirm', 'DELETE');
+                groups.forEach(function(g){ fd.append('groups[]', g); });
+                fetch(ajaxurl, { method:'POST', body:fd, credentials:'same-origin' })
+                    .then(function(r){ return r.json(); })
+                    .then(function(j){
+                        if (!j || !j.success) {
+                            resultBox.innerHTML = '<div class="notice notice-error" style="padding:8px 12px;"><strong><?php echo esc_js(__('Failed.', 'cleversay')); ?></strong> ' + (j && j.data ? j.data : '<?php echo esc_js(__('Unknown error', 'cleversay')); ?>') + '</div>';
+                            runBtn.disabled = false;
+                            runBtn.textContent = '<?php echo esc_js(__('Reset Selected Test Data', 'cleversay')); ?>';
+                            return;
+                        }
+                        var rows = j.data.results.map(function(r){
+                            var status = r.ok
+                                ? '<span style="color:#0a7d2c;">✅</span>'
+                                : '<span style="color:#a00;">❌ ' + (r.error || '') + '</span>';
+                            return '<tr><td><code>' + r.table + '</code></td><td>' + r.deleted + '</td><td>' + status + '</td></tr>';
+                        }).join('');
+                        resultBox.innerHTML =
+                            '<div class="notice notice-success" style="padding:12px 16px;">' +
+                              '<p><strong><?php echo esc_js(__('Done.', 'cleversay')); ?></strong> ' +
+                              '<?php echo esc_js(__('Total rows deleted:', 'cleversay')); ?> ' + j.data.total_deleted + '</p>' +
+                              '<table class="widefat striped" style="max-width:780px;">' +
+                                '<thead><tr><th><?php echo esc_js(__('Table', 'cleversay')); ?></th><th><?php echo esc_js(__('Rows Deleted', 'cleversay')); ?></th><th><?php echo esc_js(__('Status', 'cleversay')); ?></th></tr></thead>' +
+                                '<tbody>' + rows + '</tbody>' +
+                              '</table>' +
+                              '<p style="margin-top:12px;"><a href="javascript:location.reload()"><?php echo esc_js(__('Reload page to refresh counts', 'cleversay')); ?></a></p>' +
+                            '</div>';
+                    })
+                    .catch(function(err){
+                        resultBox.innerHTML = '<div class="notice notice-error" style="padding:8px 12px;"><strong>Error:</strong> ' + (err && err.message ? err.message : err) + '</div>';
+                        runBtn.disabled = false;
+                        runBtn.textContent = '<?php echo esc_js(__('Reset Selected Test Data', 'cleversay')); ?>';
+                    });
+            });
+        })();
+        </script>
+        <?php
+    }
+
+    /**
+     * AJAX handler for the actual data wipe. Triple-checked: super-admin
+     * capability, nonce, and confirmation string. Returns a per-table
+     * result array so the UI can show exactly what happened.
+     *
+     * Uses TRUNCATE TABLE rather than DELETE — faster, resets auto-
+     * increment, and ensures we never leave half-deleted state. A failure
+     * on one table doesn't abort the others; each is wrapped in its own
+     * try/catch and the result is reported separately.
+     *
+     * @since 4.42.25
+     */
+    public function ajax_reset_test_data(): void {
+        if (!is_super_admin()) {
+            wp_send_json_error(__('Permission denied.', 'cleversay'), 403);
+        }
+        check_ajax_referer('cleversay_reset_test_data', '_wpnonce');
+
+        $confirm = isset($_POST['confirm']) ? sanitize_text_field(wp_unslash($_POST['confirm'])) : '';
+        if ($confirm !== 'DELETE') {
+            wp_send_json_error(__('Missing or invalid confirmation.', 'cleversay'), 400);
+        }
+
+        $selected_groups = isset($_POST['groups']) && is_array($_POST['groups'])
+            ? array_map('sanitize_text_field', wp_unslash($_POST['groups']))
+            : [];
+        if (empty($selected_groups)) {
+            wp_send_json_error(__('No groups selected.', 'cleversay'), 400);
+        }
+
+        $all_groups = $this->get_reset_test_data_groups();
+        // Build the list of tables to wipe based on the selected groups.
+        // Anything not in $all_groups (e.g. injected via crafted POST) is
+        // silently ignored — we never wipe a table that isn't in our
+        // explicit allowlist.
+        $tables_to_wipe = [];
+        foreach ($selected_groups as $group_key) {
+            if (!isset($all_groups[$group_key])) continue;
+            foreach ($all_groups[$group_key]['tables'] as $label => $table_name) {
+                $tables_to_wipe[$label] = $table_name;
+            }
+        }
+        if (empty($tables_to_wipe)) {
+            wp_send_json_error(__('No valid groups selected.', 'cleversay'), 400);
+        }
+
+        global $wpdb;
+        $results = [];
+        $total_deleted = 0;
+
+        foreach ($tables_to_wipe as $label => $table) {
+            $exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+            if ($exists === '') {
+                $results[] = [
+                    'table'   => $table,
+                    'deleted' => 0,
+                    'ok'      => true,
+                    'note'    => 'table_missing',
+                ];
+                continue;
+            }
+            // Read row count BEFORE truncate so we can report exactly
+            // how many rows were deleted. TRUNCATE doesn't return a row
+            // count itself.
+            $rows = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+            // TRUNCATE TABLE: faster than DELETE, resets auto-increment.
+            // Wrapped in try/catch since wpdb->query can return false on
+            // permission issues (e.g. shared hosting that disallows
+            // TRUNCATE — falling back to DELETE in that case).
+            $truncated = $wpdb->query("TRUNCATE TABLE `{$table}`");
+            if ($truncated === false) {
+                $del = $wpdb->query("DELETE FROM `{$table}`");
+                if ($del === false) {
+                    $results[] = [
+                        'table'   => $table,
+                        'deleted' => 0,
+                        'ok'      => false,
+                        'error'   => 'DELETE failed: ' . ($wpdb->last_error ?: 'unknown'),
+                    ];
+                    continue;
+                }
+            }
+            $total_deleted += $rows;
+            $results[] = [
+                'table'   => $table,
+                'deleted' => $rows,
+                'ok'      => true,
+            ];
+        }
+
+        // Log the action with the actor for audit.
+        if (class_exists('\\CleverSay\\Logger')) {
+            \CleverSay\Logger::instance()->info('Reset Test Data executed', [
+                'user_id'        => get_current_user_id(),
+                'blog_id'        => function_exists('get_current_blog_id') ? get_current_blog_id() : 1,
+                'groups'         => $selected_groups,
+                'total_deleted'  => $total_deleted,
+                'table_count'    => count($tables_to_wipe),
+            ]);
+        }
+
+        wp_send_json_success([
+            'total_deleted' => $total_deleted,
+            'results'       => $results,
+        ]);
+    }
+
     /**
      * Render dashboard page
      */
@@ -1083,6 +1911,23 @@ class Admin {
             $this->export_leads_csv();
             exit;
         }
+
+        // v4.42.27+: Mark Leads as "viewed" for the count badge. Updates
+        // the per-admin, per-tenant last-viewed timestamp so the menu
+        // badge resets to zero (or whatever rows come in after this
+        // moment). Done BEFORE include so the timestamp is current
+        // before the page renders any "new" markers it might add.
+        // Skipped on CSV export (the early-exit above) — exporting
+        // doesn't mean the admin actually reviewed the list.
+        $user_id = get_current_user_id();
+        if ($user_id > 0) {
+            update_user_meta(
+                $user_id,
+                self::leads_last_viewed_meta_key(),
+                time()
+            );
+        }
+
         include CLEVERSAY_PLUGIN_DIR . 'admin/views/leads.php';
     }
 
@@ -1158,7 +2003,864 @@ class Admin {
     public function render_settings(): void {
         include CLEVERSAY_PLUGIN_DIR . 'admin/views/settings.php';
     }
-    
+
+    /**
+     * v4.41.0+: Per-site Embeddings admin page.
+     *
+     * Shows the queue / embedding status for the CURRENT site's blog
+     * context — counts come from this site's wp_X_cleversay_* tables
+     * and the matching tenant_id rows in Supabase. Action buttons
+     * (Backfill, Process Queue Now, Retry Failed) and the per-tenant
+     * max_chunks setting also live here.
+     *
+     * Network-level configuration (Supabase credentials, OpenAI API key,
+     * feature flags) stays in Network Admin → CleverSay → Embeddings.
+     *
+     * See Bugs 1, 2, 5 in the v4.41.0 handoff brief.
+     */
+    /**
+     * v4.41.5+: Per-site Latency dashboard.
+     *
+     * Reads from wp_X_cleversay_request_metrics (this site's table)
+     * joined to cleversay_questions for the question text. Computes
+     * percentiles in PHP from the result set; with the 90-day retention
+     * cap and the idx_created index, the scan is small enough that the
+     * extra round trip is fine.
+     *
+     * Pure read view — no side effects, no actions to handle.
+     */
+    public function render_latency(): void {
+        global $wpdb;
+
+        $window_hours = isset($_GET['window']) ? (int) $_GET['window'] : 24;
+        if (!in_array($window_hours, [1, 24, 168, 720], true)) {
+            $window_hours = 24;
+        }
+
+        $metrics_table   = $wpdb->prefix . 'cleversay_request_metrics';
+        $questions_table = $wpdb->prefix . 'cleversay_questions';
+
+        // Time-bound rows, ordered by created_at DESC. We pull all the
+        // rows in the window into memory (capped by retention + window
+        // size, so worst case ~thousands of rows) and compute
+        // percentiles in PHP — simpler and more portable than relying
+        // on MySQL window functions, and still fast for typical sizes.
+        $cutoff = gmdate('Y-m-d H:i:s', time() - ($window_hours * 3600));
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, question_id, total_ms, kb_ms, retrieval_ms,
+                    synthesis_ms, render_ms, ai_fallback_fired, cache_hit,
+                    gate_fired, matched_layer, tokens_in, tokens_out,
+                    cost, synthesis_model, created_at
+             FROM {$metrics_table}
+             WHERE created_at >= %s
+             ORDER BY created_at DESC",
+            $cutoff
+        ), ARRAY_A);
+
+        $stats  = $this->compute_latency_stats($rows ?: []);
+        $recent = $this->fetch_slowest_with_questions(
+            $rows ?: [],
+            $questions_table,
+            10
+        );
+        // v4.41.5.6+: companion tables to "Slowest queries" — both useful,
+        // but for different reasons:
+        //   - $fastest_overall: literal inverse sort. Mostly answers
+        //     "is Layer 1 doing its job for the common questions?"
+        //     since kb_strong rows skip synthesis entirely and dominate
+        //     the bottom of the latency distribution.
+        //   - $fastest_synthesis: fastest among rows where AI synthesis
+        //     ran. Useful for model A/B because it exposes the lower
+        //     bound a model can deliver under good cache conditions.
+        //     Filtering to ai_fallback_fired=true keeps kb_strong rows
+        //     out (where they'd otherwise dominate purely because they
+        //     never made an LLM call).
+        $fastest_overall = $this->fetch_ranked_with_questions(
+            $rows ?: [],
+            $questions_table,
+            10,
+            'asc',
+            null
+        );
+        $fastest_synthesis = $this->fetch_ranked_with_questions(
+            $rows ?: [],
+            $questions_table,
+            10,
+            'asc',
+            static fn(array $r): bool =>
+                !empty($r['ai_fallback_fired']) && $r['synthesis_ms'] !== null
+        );
+
+        include CLEVERSAY_PLUGIN_DIR . 'admin/views/latency.php';
+    }
+
+    /**
+     * Compute percentiles + counts from the latency rows. Pure function;
+     * no DB access. Returns the shape the latency view expects.
+     */
+    private function compute_latency_stats(array $rows): array {
+        $stats = [
+            'total_queries'    => count($rows),
+            'cache_hits'       => 0,
+            'ai_fired'         => 0,
+            'gate_fired'       => 0,
+            'gate_evaluated'   => 0,
+            'total_tokens_in'  => 0,
+            'total_tokens_out' => 0,
+            'total_cost'       => 0.0,
+            'p50_total'        => null,
+            'p95_total'        => null,
+            'p50_kb'           => null, 'p95_kb'         => null, 'n_kb'         => 0,
+            'p50_retrieval'    => null, 'p95_retrieval'  => null, 'n_retrieval'  => 0,
+            'p50_synthesis'    => null, 'p95_synthesis'  => null, 'n_synthesis'  => 0,
+            'p50_render'       => null, 'p95_render'     => null, 'n_render'     => 0,
+            'by_layer'         => [],
+            // v4.41.5.3+: synthesis-only stats grouped by model. Counts
+            // and percentiles computed only over rows that actually ran
+            // synthesis (synthesis_ms IS NOT NULL). The whole point of
+            // this section is A/B comparison across model swaps, so
+            // including KB-strong rows (no synthesis ran, no model
+            // recorded) would dilute the comparison.
+            'by_synthesis_model' => [],
+        ];
+        if (empty($rows)) {
+            return $stats;
+        }
+
+        $totals = [];
+        $by_stage = [
+            'kb_ms' => [], 'retrieval_ms' => [],
+            'synthesis_ms' => [], 'render_ms' => [],
+        ];
+        $by_layer_totals = []; // layer => [totals]
+        // model => ['synth_ms' => [...], 'tokens_out' => [...], 'cost' => [...]]
+        $by_model = [];
+
+        foreach ($rows as $r) {
+            $totals[] = (int) $r['total_ms'];
+            if (!empty($r['cache_hit']))         $stats['cache_hits']++;
+            if (!empty($r['ai_fallback_fired'])) $stats['ai_fired']++;
+            if ($r['gate_fired'] !== null) {
+                $stats['gate_evaluated']++;
+                if ((int) $r['gate_fired'] === 1) $stats['gate_fired']++;
+            }
+            $stats['total_tokens_in']  += (int) ($r['tokens_in']  ?? 0);
+            $stats['total_tokens_out'] += (int) ($r['tokens_out'] ?? 0);
+            $stats['total_cost']       += (float) ($r['cost']     ?? 0);
+
+            foreach ($by_stage as $col => &$bucket) {
+                if ($r[$col] !== null) {
+                    $bucket[] = (int) $r[$col];
+                }
+            }
+            unset($bucket);
+
+            $layer = (string) $r['matched_layer'];
+            if (!isset($by_layer_totals[$layer])) {
+                $by_layer_totals[$layer] = [];
+            }
+            $by_layer_totals[$layer][] = (int) $r['total_ms'];
+
+            // v4.41.5.3+: per-synthesis-model bucket. Only rows where
+            // synthesis actually ran contribute. NULL synthesis_model
+            // is bucketed as 'unknown' so legacy rows from before the
+            // column was added (or rare cases where the AI call failed
+            // before model capture) still show up rather than being
+            // silently dropped.
+            if ($r['synthesis_ms'] !== null) {
+                $model = $r['synthesis_model'] !== null && $r['synthesis_model'] !== ''
+                    ? (string) $r['synthesis_model']
+                    : 'unknown';
+                if (!isset($by_model[$model])) {
+                    $by_model[$model] = ['synth_ms' => [], 'tokens_out' => [], 'cost' => []];
+                }
+                $by_model[$model]['synth_ms'][] = (int) $r['synthesis_ms'];
+                if ($r['tokens_out'] !== null) {
+                    $by_model[$model]['tokens_out'][] = (int) $r['tokens_out'];
+                }
+                if ($r['cost'] !== null) {
+                    $by_model[$model]['cost'][] = (float) $r['cost'];
+                }
+            }
+        }
+
+        $stats['p50_total'] = $this->percentile($totals, 50);
+        $stats['p95_total'] = $this->percentile($totals, 95);
+
+        foreach ($by_stage as $col => $bucket) {
+            $stage = str_replace('_ms', '', $col);
+            $stats["p50_{$stage}"] = $this->percentile($bucket, 50);
+            $stats["p95_{$stage}"] = $this->percentile($bucket, 95);
+            $stats["n_{$stage}"]   = count($bucket);
+        }
+
+        // Routing breakdown — preserve a stable display order.
+        $order = ['kb_strong', 'kb_weak_with_ai', 'ai_only', 'no_answer'];
+        foreach ($order as $layer) {
+            if (isset($by_layer_totals[$layer])) {
+                $stats['by_layer'][$layer] = [
+                    'count'     => count($by_layer_totals[$layer]),
+                    'p50_total' => $this->percentile($by_layer_totals[$layer], 50),
+                ];
+            }
+        }
+        // Any unknown layer values (shouldn't happen with the enum) get
+        // appended at the end so they're not silently dropped.
+        foreach ($by_layer_totals as $layer => $vals) {
+            if (!isset($stats['by_layer'][$layer])) {
+                $stats['by_layer'][$layer] = [
+                    'count'     => count($vals),
+                    'p50_total' => $this->percentile($vals, 50),
+                ];
+            }
+        }
+
+        // v4.41.5.3+: per-model summary. Sort by descending count so the
+        // most-used model appears first — typically the active one,
+        // making the dashboard read naturally as "current vs prior."
+        foreach ($by_model as $model => $bucket) {
+            $stats['by_synthesis_model'][$model] = [
+                'count'           => count($bucket['synth_ms']),
+                'p50_synth'       => $this->percentile($bucket['synth_ms'], 50),
+                'p95_synth'       => $this->percentile($bucket['synth_ms'], 95),
+                'p50_tokens_out'  => $this->percentile($bucket['tokens_out'], 50),
+                'total_cost'      => array_sum($bucket['cost']),
+            ];
+        }
+        uasort($stats['by_synthesis_model'], static fn($a, $b) => $b['count'] <=> $a['count']);
+
+        return $stats;
+    }
+
+    /**
+     * Linear-interpolation percentile on an int array. Returns null on
+     * empty input. Matches the convention used by most percentile
+     * libraries (no off-by-one weirdness on small arrays).
+     */
+    private function percentile(array $values, int $p): ?int {
+        if (empty($values)) return null;
+        sort($values);
+        $rank = ($p / 100) * (count($values) - 1);
+        $lo = (int) floor($rank);
+        $hi = (int) ceil($rank);
+        if ($lo === $hi) return (int) $values[$lo];
+        $frac = $rank - $lo;
+        return (int) round($values[$lo] + ($values[$hi] - $values[$lo]) * $frac);
+    }
+
+    /**
+     * Pick the N slowest rows in the supplied result set and join them
+     * to question text for display. Done in PHP because we already have
+     * all the rows in memory and a second query just for question text
+     * is needless I/O.
+     *
+     * v4.41.5.6+: thin wrapper around fetch_ranked_with_questions for
+     * back-compat with render_latency's existing call site.
+     */
+    private function fetch_slowest_with_questions(array $rows, string $questions_table, int $limit): array {
+        return $this->fetch_ranked_with_questions($rows, $questions_table, $limit, 'desc', null);
+    }
+
+    /**
+     * v4.41.5.6+: generalized version of fetch_slowest_with_questions.
+     * Sorts by total_ms in the requested direction and optionally
+     * filters rows before sorting (e.g., only rows where synthesis ran,
+     * for the "fastest synthesis" table — including kb_strong rows
+     * there would just rank the queries that skipped the LLM entirely).
+     *
+     * @param array        $rows            Raw metric rows from render_latency.
+     * @param string       $questions_table Per-tenant questions table name.
+     * @param int          $limit           Max rows to return.
+     * @param string       $direction       'asc' for fastest, 'desc' for slowest.
+     * @param callable|null $filter         Optional row predicate; rows where
+     *                                       it returns false are dropped before
+     *                                       sorting. Signature: fn(array $row): bool.
+     */
+    private function fetch_ranked_with_questions(
+        array $rows,
+        string $questions_table,
+        int $limit,
+        string $direction = 'desc',
+        ?callable $filter = null
+    ): array {
+        if (empty($rows)) return [];
+        global $wpdb;
+
+        if ($filter !== null) {
+            $rows = array_values(array_filter($rows, $filter));
+            if (empty($rows)) return [];
+        }
+
+        // Sort by total_ms in the requested direction, take top N.
+        if ($direction === 'asc') {
+            usort($rows, static fn($a, $b) => (int) $a['total_ms'] <=> (int) $b['total_ms']);
+        } else {
+            usort($rows, static fn($a, $b) => (int) $b['total_ms'] <=> (int) $a['total_ms']);
+        }
+        $top = array_slice($rows, 0, $limit);
+
+        $ids = array_filter(array_map(static fn($r) => (int) $r['question_id'], $top));
+        if (empty($ids)) return $top;
+
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $q_rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, question FROM {$questions_table}
+             WHERE id IN ({$placeholders})",
+            ...array_map('intval', $ids)
+        ), ARRAY_A);
+        $by_id = [];
+        foreach ($q_rows as $qr) {
+            $by_id[(int) $qr['id']] = (string) $qr['question'];
+        }
+        foreach ($top as &$row) {
+            $row['question_text'] = $by_id[(int) $row['question_id']] ?? '';
+        }
+        unset($row);
+        return $top;
+    }
+
+    /**
+     * v4.42.0+: handle bulk test CSV upload on admin_init. Runs before
+     * the admin page renders, so wp_redirect() works cleanly. On
+     * success, redirects to the new run's detail page; on failure,
+     * stashes an admin notice and lets render_bulk_test() show the
+     * upload form again.
+     *
+     * Gated tightly: only fires on the bulk test page, only on POST
+     * with the right action, only for super-admins. Anything else
+     * is a no-op so this hook is cheap on every other admin page load.
+     */
+    public function handle_bulk_test_upload_init(): void {
+        // Only fire on POST to the bulk test admin page.
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') return;
+        if (($_GET['page'] ?? '') !== 'cleversay-bulk-test') return;
+        if (($_POST['cleversay_bulk_action'] ?? '') !== 'create_run') return;
+        if (!is_super_admin()) return;
+
+        if (!isset($_POST['cleversay_bulk_nonce'])
+            || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_bulk_nonce'])), 'cleversay_bulk_test')
+        ) {
+            // Bad nonce — fall through; render_bulk_test will show the
+            // form without a notice (don't reveal CSRF state).
+            return;
+        }
+
+        $new_run_id = $this->handle_bulk_test_upload();
+        if ($new_run_id > 0) {
+            wp_redirect(add_query_arg(
+                ['page' => 'cleversay-bulk-test', 'mode' => 'detail', 'run_id' => $new_run_id],
+                admin_url('admin.php')
+            ));
+            exit;
+        }
+        // Stash notices in a transient so render_bulk_test can surface
+        // them after fall-through. (settings_errors() doesn't reliably
+        // persist between admin_init and the page render in this code
+        // path.) Keyed on user id so concurrent admins don't see each
+        // other's errors.
+        $errors = get_settings_errors('cleversay_bulk_test');
+        if (!empty($errors)) {
+            set_transient(
+                'cleversay_bulk_test_errors_' . get_current_user_id(),
+                $errors,
+                30
+            );
+        }
+    }
+
+    /**
+     * v4.42.0+: Per-site Bulk Question Test admin.
+     *
+     * Three modes selected by ?mode=: list (default), upload, detail.
+     * CSV upload is handled in handle_bulk_test_upload_init (admin_init)
+     * to allow clean wp_redirect; this method only renders.
+     */
+    public function render_bulk_test(): void {
+        if (!is_super_admin()) {
+            wp_die(esc_html__('Insufficient permissions.', 'cleversay'));
+        }
+
+        // Surface any upload errors stashed by the admin_init handler.
+        $tk = 'cleversay_bulk_test_errors_' . get_current_user_id();
+        $stashed = get_transient($tk);
+        if (is_array($stashed) && !empty($stashed)) {
+            delete_transient($tk);
+            foreach ($stashed as $err) {
+                add_settings_error(
+                    'cleversay_bulk_test',
+                    $err['code']    ?? 'error',
+                    $err['message'] ?? '',
+                    $err['type']    ?? 'error'
+                );
+            }
+            settings_errors('cleversay_bulk_test');
+        }
+
+        $mode   = sanitize_text_field(wp_unslash($_GET['mode'] ?? 'list'));
+        $run_id = isset($_GET['run_id']) ? (int) $_GET['run_id'] : null;
+
+        $runs        = [];
+        $run         = null;
+        $results     = [];
+        $pending_ids = [];
+
+        if ($mode === 'detail' && $run_id) {
+            $run = \CleverSay\BulkTester::get_run($run_id);
+            if (!$run) {
+                $mode = 'list';
+            } else {
+                $results     = \CleverSay\BulkTester::get_results($run_id);
+                $pending_ids = \CleverSay\BulkTester::get_pending_ids($run_id);
+            }
+        }
+
+        if ($mode === 'list' || $mode === '') {
+            $mode = 'list';
+            $runs = \CleverSay\BulkTester::list_runs(50);
+        }
+
+        include CLEVERSAY_PLUGIN_DIR . 'admin/views/bulk-test.php';
+    }
+
+    /**
+     * Parse the uploaded CSV and create a new run. Returns run_id on
+     * success, 0 on failure (with admin notice queued for the next render).
+     *
+     * Expected CSV format: header row with at least a 'question' column.
+     * Optional 'notes' column. UTF-8 encoded. Both LF and CRLF tolerated.
+     */
+    private function handle_bulk_test_upload(): int {
+        if (empty($_FILES['bulk_csv']) || ($_FILES['bulk_csv']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            add_settings_error('cleversay_bulk_test', 'no_file',
+                __('No CSV file uploaded.', 'cleversay'), 'error');
+            return 0;
+        }
+
+        $tmp = $_FILES['bulk_csv']['tmp_name'];
+        if (!is_uploaded_file($tmp)) {
+            add_settings_error('cleversay_bulk_test', 'bad_upload',
+                __('Upload failed: file rejected by security check.', 'cleversay'), 'error');
+            return 0;
+        }
+
+        $fh = fopen($tmp, 'r');
+        if (!$fh) {
+            add_settings_error('cleversay_bulk_test', 'fopen_failed',
+                __('Could not open uploaded file.', 'cleversay'), 'error');
+            return 0;
+        }
+
+        // Parse header row to find the column indices for 'question' and
+        // (optionally) 'notes'. Header names are case-insensitive and
+        // whitespace-tolerant.
+        $header = fgetcsv($fh);
+        if (!$header) {
+            fclose($fh);
+            add_settings_error('cleversay_bulk_test', 'empty_csv',
+                __('CSV is empty or unreadable.', 'cleversay'), 'error');
+            return 0;
+        }
+        $header_lc = array_map(static fn($h) => strtolower(trim((string) $h)), $header);
+        $q_idx     = array_search('question', $header_lc, true);
+        $n_idx     = array_search('notes',    $header_lc, true);
+        if ($q_idx === false) {
+            fclose($fh);
+            add_settings_error('cleversay_bulk_test', 'no_question_column',
+                __('CSV must have a column named "question".', 'cleversay'), 'error');
+            return 0;
+        }
+
+        $rows = [];
+        $line = 1; // header was line 1
+        while (($data = fgetcsv($fh)) !== false) {
+            $line++;
+            if (count($rows) >= 5000) {
+                fclose($fh);
+                add_settings_error('cleversay_bulk_test', 'too_many',
+                    __('CSV exceeds 5000-row limit. Split into multiple uploads.', 'cleversay'), 'error');
+                return 0;
+            }
+            $question = isset($data[$q_idx]) ? trim((string) $data[$q_idx]) : '';
+            if ($question === '') continue; // skip blank rows silently
+            $notes = ($n_idx !== false && isset($data[$n_idx])) ? trim((string) $data[$n_idx]) : '';
+            $rows[] = [
+                'question' => $question,
+                'notes'    => $notes,
+            ];
+        }
+        fclose($fh);
+
+        if (empty($rows)) {
+            add_settings_error('cleversay_bulk_test', 'no_rows',
+                __('No question rows found in CSV.', 'cleversay'), 'error');
+            return 0;
+        }
+
+        $label = sanitize_text_field(wp_unslash($_POST['bulk_label'] ?? ''));
+        $run_id = \CleverSay\BulkTester::create_run($rows, $label !== '' ? $label : null);
+        if ($run_id === 0) {
+            add_settings_error('cleversay_bulk_test', 'create_failed',
+                __('Failed to create run. Check error log.', 'cleversay'), 'error');
+            return 0;
+        }
+        return $run_id;
+    }
+
+    /**
+     * AJAX: process one pending row of a bulk test run. Driven by the
+     * browser-side loop on the detail page. Returns the persisted result
+     * row + updated run summary so the page can render progress without
+     * a second request.
+     */
+    public function ajax_bulk_test_process(): void {
+        if (!is_super_admin()) {
+            wp_send_json_error(['message' => 'Forbidden'], 403);
+        }
+        check_ajax_referer('cleversay_bulk_test', 'nonce');
+
+        $result_id = isset($_POST['result_id']) ? (int) $_POST['result_id'] : 0;
+        if ($result_id <= 0) {
+            wp_send_json_error(['message' => 'Missing result_id'], 400);
+        }
+
+        $resp = \CleverSay\BulkTester::process_one($result_id);
+        if (!$resp['ok']) {
+            wp_send_json_error(['message' => $resp['error'] ?? 'Unknown error'], 500);
+        }
+
+        // Include current run state so the browser can update its
+        // headline counters without a second request.
+        $run = \CleverSay\BulkTester::get_run((int) $resp['result']['run_id']);
+
+        wp_send_json_success([
+            'result' => $resp['result'],
+            'run'    => $run,
+        ]);
+    }
+
+    /**
+     * AJAX: abort a running bulk test. Browser also stops issuing new
+     * process requests, but this flips the persisted status so a refresh
+     * shows 'aborted' instead of 'running'.
+     */
+    public function ajax_bulk_test_abort(): void {
+        if (!is_super_admin()) {
+            wp_send_json_error(['message' => 'Forbidden'], 403);
+        }
+        check_ajax_referer('cleversay_bulk_test', 'nonce');
+        $run_id = isset($_POST['run_id']) ? (int) $_POST['run_id'] : 0;
+        if ($run_id > 0) {
+            \CleverSay\BulkTester::abort($run_id);
+        }
+        wp_send_json_success();
+    }
+
+    /**
+     * AJAX: stream the run's results as a CSV download. GET request so
+     * it's a clickable link from the detail page.
+     */
+    public function ajax_bulk_test_download(): void {
+        if (!is_super_admin()) {
+            wp_die('Forbidden', '', ['response' => 403]);
+        }
+        $nonce  = sanitize_text_field(wp_unslash($_GET['nonce'] ?? ''));
+        if (!wp_verify_nonce($nonce, 'cleversay_bulk_test')) {
+            wp_die('Bad nonce', '', ['response' => 403]);
+        }
+        $run_id = isset($_GET['run_id']) ? (int) $_GET['run_id'] : 0;
+        if ($run_id <= 0) {
+            wp_die('Missing run_id', '', ['response' => 400]);
+        }
+
+        $run     = \CleverSay\BulkTester::get_run($run_id);
+        $results = \CleverSay\BulkTester::get_results($run_id);
+        if (!$run) {
+            wp_die('Run not found', '', ['response' => 404]);
+        }
+
+        $filename = sprintf('cleversay-bulk-test-run-%d-%s.csv',
+            $run_id,
+            gmdate('Ymd-His')
+        );
+
+        nocache_headers();
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+        $out = fopen('php://output', 'w');
+        // BOM so Excel opens UTF-8 correctly.
+        fwrite($out, "\xEF\xBB\xBF");
+
+        fputcsv($out, [
+            'row_index', 'question', 'notes', 'status', 'matched_layer',
+            'ai_fallback_fired', 'top_vector_similarity', 'top_vector_chunk_id',
+            'top_fulltext_chunk_id', 'gate_fired', 'synthesis_model',
+            'tokens_in', 'tokens_out', 'cost', 'total_ms', 'answer_text', 'error',
+        ]);
+        foreach ($results as $r) {
+            fputcsv($out, [
+                $r['row_index'],
+                $r['question'],
+                $r['notes'] ?? '',
+                $r['status'],
+                $r['matched_layer'] ?? '',
+                $r['ai_fallback_fired'] ?? '',
+                $r['top_vector_similarity'] ?? '',
+                $r['top_vector_chunk_id'] ?? '',
+                $r['top_fulltext_chunk_id'] ?? '',
+                $r['gate_fired'] ?? '',
+                $r['synthesis_model'] ?? '',
+                $r['tokens_in'] ?? '',
+                $r['tokens_out'] ?? '',
+                $r['cost'] ?? '',
+                $r['total_ms'] ?? '',
+                $r['answer_text'] ?? '',
+                $r['error'] ?? '',
+            ]);
+        }
+        fclose($out);
+        exit;
+    }
+
+    public function render_site_embeddings(): void {
+        // Defensive: page registration is gated on Supabase::is_enabled(),
+        // but a flag flip between request start and render is possible.
+        if (!\CleverSay\Supabase::is_enabled()) {
+            echo '<div class="wrap cleversay-admin"><h1>'
+                . esc_html__('Embeddings', 'cleversay')
+                . '</h1><p>'
+                . esc_html__(
+                    'The embeddings feature is not currently enabled at the network level.',
+                    'cleversay'
+                )
+                . '</p></div>';
+            return;
+        }
+
+        try {
+            $stats = (new \CleverSay\Embedder())->get_queue_stats();
+        } catch (\Throwable $e) {
+            $stats = ['error' => $e->getMessage()];
+        }
+
+        $max_chunks = (int) get_option(
+            'cleversay_ai_max_chunks',
+            \CleverSay\Indexer::MAX_CHUNKS
+        );
+        $blog_id = (int) get_current_blog_id();
+
+        // Pick up any one-shot notice from the action handler.
+        $notice = get_transient('cleversay_site_embeddings_notice_' . $blog_id);
+        if ($notice) {
+            delete_transient('cleversay_site_embeddings_notice_' . $blog_id);
+        }
+
+        include CLEVERSAY_PLUGIN_DIR . 'admin/views/embeddings-site.php';
+    }
+
+    /**
+     * v4.41.0+: Handle per-site embeddings admin form submissions.
+     *
+     * Replaces the old network-admin handlers that iterated get_sites()
+     * with switch_to_blog. Each click on this page operates ONLY in the
+     * current blog's context — no iteration, no surprises about which
+     * tenants were affected.
+     *
+     * Routes:
+     *   - backfill         → Embedder::backfill_all() in current blog context
+     *   - process_now      → Embedder::process_queue() in current blog context
+     *   - retry_failed     → Embedder::retry_failed_jobs() in current blog context
+     *   - save_settings    → updates cleversay_ai_max_chunks for this site
+     *
+     * Notices are stashed in a per-blog transient and surfaced on the
+     * next page render.
+     */
+    public function handle_site_embeddings_actions(): void {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            return;
+        }
+        $action = isset($_POST['cleversay_site_supabase_action'])
+            ? sanitize_key((string) $_POST['cleversay_site_supabase_action'])
+            : '';
+        if ($action === '') {
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $blog_id = (int) get_current_blog_id();
+        $notice  = null;
+
+        // v4.42.32+: Backfill Missing Only — surgical version of the
+        // backfill operation. Enqueues only items that lack a current
+        // Supabase row, leaving already-embedded items untouched.
+        // Manual button passes $force=true to bypass the auto-cap, on
+        // the same logic as the strand-cleanup button: admin saw the
+        // count on screen and explicitly chose to proceed.
+        if ($action === 'backfill_missing'
+            && isset($_POST['cleversay_site_supabase_backfill_missing_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_supabase_backfill_missing_nonce'])),
+                'cleversay_site_supabase_backfill_missing'
+            )
+        ) {
+            try {
+                $result = (new \CleverSay\Embedder())->backfill_missing_embeddings(true);
+                if (!empty($result['success'])) {
+                    $notice = [
+                        'type'    => 'success',
+                        'message' => sprintf(
+                            /* translators: %d = items enqueued */
+                            __('Enqueued %d missing embedding job(s). Processing happens via WP-Cron — refresh the page in a few minutes to see updated counts.', 'cleversay'),
+                            (int) $result['enqueued']
+                        ),
+                    ];
+                } else {
+                    $notice = [
+                        'type'    => 'error',
+                        'message' => 'Backfill Missing failed: ' . ($result['reason'] ?? 'unknown'),
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $notice = ['type' => 'error', 'message' => 'Backfill Missing failed: ' . $e->getMessage()];
+            }
+        }
+
+        // Backfill (re-embed everything)
+        if ($action === 'backfill'
+            && isset($_POST['cleversay_site_supabase_backfill_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_supabase_backfill_nonce'])),
+                'cleversay_site_supabase_backfill'
+            )
+        ) {
+            try {
+                $r = (new \CleverSay\Embedder())->backfill_all();
+                $notice = [
+                    'type'    => 'success',
+                    'message' => sprintf(
+                        /* translators: 1: KB entry count, 2: chunk count */
+                        __('Queued %1$d KB entries and %2$d source chunks for embedding. Processing happens via WP-Cron.', 'cleversay'),
+                        (int) ($r['kb_entries'] ?? 0),
+                        (int) ($r['chunks'] ?? 0)
+                    ),
+                ];
+            } catch (\Throwable $e) {
+                $notice = ['type' => 'error', 'message' => 'Backfill failed: ' . $e->getMessage()];
+            }
+        }
+
+        // Process Queue Now
+        if ($action === 'process_now'
+            && isset($_POST['cleversay_site_supabase_process_now_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_supabase_process_now_nonce'])),
+                'cleversay_site_supabase_process_now'
+            )
+        ) {
+            try {
+                $s = (new \CleverSay\Embedder())->process_queue();
+                $notice = [
+                    'type'    => 'success',
+                    'message' => sprintf(
+                        /* translators: 1: processed, 2: succeeded, 3: failed */
+                        __('Processed %1$d jobs: %2$d succeeded, %3$d failed.', 'cleversay'),
+                        (int) ($s['processed'] ?? 0),
+                        (int) ($s['succeeded'] ?? 0),
+                        (int) ($s['failed']    ?? 0)
+                    ),
+                ];
+            } catch (\Throwable $e) {
+                $notice = ['type' => 'error', 'message' => 'Process queue failed: ' . $e->getMessage()];
+            }
+        }
+
+        // Retry Failed Jobs
+        if ($action === 'retry_failed'
+            && isset($_POST['cleversay_site_supabase_retry_failed_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_supabase_retry_failed_nonce'])),
+                'cleversay_site_supabase_retry_failed'
+            )
+        ) {
+            try {
+                $reset = (int) (new \CleverSay\Embedder())->retry_failed_jobs();
+                $notice = [
+                    'type'    => 'success',
+                    'message' => sprintf(
+                        /* translators: %d = number of jobs reset */
+                        __('Reset %d failed jobs to pending. They will retry on the next cron run.', 'cleversay'),
+                        $reset
+                    ),
+                ];
+            } catch (\Throwable $e) {
+                $notice = ['type' => 'error', 'message' => 'Retry failed: ' . $e->getMessage()];
+            }
+        }
+
+        // v4.42.31+: Clean Up Stranded Rows. Hard-deletes Supabase rows
+        // whose content_id no longer maps to a current MySQL row.
+        // Manual button passes $force=true so the safety threshold
+        // doesn't block — the admin saw the count on screen and is
+        // explicitly choosing to proceed. The daily cron passes
+        // $force=false so unusual spikes trigger the safety brake
+        // and surface for investigation rather than mass-deleting.
+        if ($action === 'cleanup_stranded'
+            && isset($_POST['cleversay_site_supabase_cleanup_stranded_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_supabase_cleanup_stranded_nonce'])),
+                'cleversay_site_supabase_cleanup_stranded'
+            )
+        ) {
+            try {
+                $result = (new \CleverSay\Embedder())->cleanup_stranded_rows(true);
+                if (!empty($result['success'])) {
+                    $notice = [
+                        'type'    => 'success',
+                        'message' => sprintf(
+                            /* translators: %d = rows deleted */
+                            __('Cleanup complete. Deleted %d stranded Supabase row(s). Refresh the page to see updated counts.', 'cleversay'),
+                            (int) $result['deleted']
+                        ),
+                    ];
+                } else {
+                    $notice = [
+                        'type'    => 'error',
+                        'message' => 'Cleanup failed: ' . ($result['reason'] ?? 'unknown'),
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $notice = ['type' => 'error', 'message' => 'Cleanup failed: ' . $e->getMessage()];
+            }
+        }
+
+        // Save Per-Site AI Settings (currently just max_chunks)
+        if ($action === 'save_settings'
+            && isset($_POST['cleversay_site_embeddings_settings_nonce'])
+            && wp_verify_nonce(
+                sanitize_text_field(wp_unslash($_POST['cleversay_site_embeddings_settings_nonce'])),
+                'cleversay_site_embeddings_settings'
+            )
+        ) {
+            $val = max(1, min(10, (int) ($_POST['ai_max_chunks'] ?? \CleverSay\Indexer::MAX_CHUNKS)));
+            update_option('cleversay_ai_max_chunks', $val);
+            $notice = [
+                'type'    => 'success',
+                'message' => __('Settings saved.', 'cleversay'),
+            ];
+        }
+
+        if ($notice !== null) {
+            set_transient('cleversay_site_embeddings_notice_' . $blog_id, $notice, 60);
+            wp_safe_redirect(add_query_arg(
+                ['page' => 'cleversay-embeddings'],
+                admin_url('admin.php')
+            ));
+            exit;
+        }
+    }
+
     /**
      * Render import/export page
      */
@@ -1692,6 +3394,122 @@ class Admin {
         return $label;
     }
 
+    /**
+     * Build the Inquiries menu label with a pending-count badge.
+     *
+     * Mirrors get_ai_answers_menu_label: counts status='pending' rows
+     * globally. Pending inquiries are work that needs an admin
+     * response, so the count is intentionally shared across all
+     * admins — every admin sees the same "5 pending" until those
+     * five are actually answered or archived.
+     *
+     * Fails silently on DB errors. Worst case the label appears
+     * without a badge.
+     *
+     * @since 4.42.27
+     */
+    private function get_inquiries_menu_label(): string {
+        $label = __('Inquiries', 'cleversay');
+        try {
+            global $wpdb;
+            $db     = new \CleverSay\Database();
+            $exists = $wpdb->get_var(
+                $wpdb->prepare("SHOW TABLES LIKE %s", $db->inquiries)
+            );
+            if (!$exists) return $label;
+            $pending = (int) $wpdb->get_var(
+                "SELECT COUNT(*) FROM {$db->inquiries} WHERE status = 'pending'"
+            );
+            if ($pending > 0) {
+                $label .= ' <span class="update-plugins count-' . $pending . '">'
+                        . '<span class="update-count">' . $pending . '</span></span>';
+            }
+        } catch (\Throwable $e) {
+            // Fail silently
+        }
+        return $label;
+    }
+
+    /**
+     * Build the Leads menu label with a per-admin "new since last
+     * viewed" count badge.
+     *
+     * Unlike Inquiries (status-shared globally), Leads has no status
+     * column. Leads are captures, not work items, so the meaningful
+     * signal is "did anything new come in since I last opened the
+     * page?" — and that's necessarily per-admin: if you and a
+     * colleague both manage Leads, your "new" counters are
+     * independent.
+     *
+     * Implementation:
+     *  - Stored as a user_meta timestamp (Unix seconds) keyed by
+     *    'cleversay_leads_last_viewed' (with the current blog ID
+     *    appended on multisite so the same admin gets independent
+     *    counters across tenants).
+     *  - On first view ever, the timestamp is missing — we treat
+     *    that as "no baseline yet" and show the total count so
+     *    admin sees something rather than always-zero.
+     *  - On subsequent views, we count rows with
+     *    created_at > last_viewed.
+     *  - The timestamp gets updated when render_leads() runs.
+     *
+     * @since 4.42.27
+     */
+    private function get_leads_menu_label(): string {
+        $label = __('Leads', 'cleversay');
+        try {
+            global $wpdb;
+            $db     = new \CleverSay\Database();
+            $exists = $wpdb->get_var(
+                $wpdb->prepare("SHOW TABLES LIKE %s", $db->leads)
+            );
+            if (!$exists) return $label;
+
+            $user_id = get_current_user_id();
+            if ($user_id <= 0) return $label;
+            $meta_key = self::leads_last_viewed_meta_key();
+            $last_viewed = (int) get_user_meta($user_id, $meta_key, true);
+
+            if ($last_viewed <= 0) {
+                // First time this admin is seeing Leads on this tenant.
+                // Show total count as the baseline.
+                $new_count = (int) $wpdb->get_var(
+                    "SELECT COUNT(*) FROM {$db->leads}"
+                );
+            } else {
+                $new_count = (int) $wpdb->get_var(
+                    $wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$db->leads} WHERE created_at > %s",
+                        gmdate('Y-m-d H:i:s', $last_viewed)
+                    )
+                );
+            }
+
+            if ($new_count > 0) {
+                $label .= ' <span class="update-plugins count-' . $new_count . '">'
+                        . '<span class="update-count">' . $new_count . '</span></span>';
+            }
+        } catch (\Throwable $e) {
+            // Fail silently
+        }
+        return $label;
+    }
+
+    /**
+     * Helper: build the user_meta key for Leads "last viewed"
+     * timestamp. Appends the blog ID on multisite so the same admin
+     * gets independent counters across tenants. Without this, an
+     * admin who manages multiple tenants would have their "last
+     * viewed" reset across all tenants whenever they opened Leads on
+     * any one of them.
+     *
+     * @since 4.42.27
+     */
+    public static function leads_last_viewed_meta_key(): string {
+        $blog_id = function_exists('get_current_blog_id') ? (int) get_current_blog_id() : 1;
+        return 'cleversay_leads_last_viewed_' . $blog_id;
+    }
+
     public function render_ai_answers(): void {
         include CLEVERSAY_PLUGIN_DIR . 'admin/views/ai-answers.php';
     }
@@ -1783,49 +3601,33 @@ class Admin {
                 $result['process'] = [['step' => 0, 'description' => 'Error', 'result' => 'Process array missing from result']];
             }
 
-            // ── aadefault AI validation (if enabled) ─────────────────────────
-            $cs_opts = get_option('cleversay_options', []);
-            $validate_aadefault = !empty($cs_opts['ai_validate_aadefault'])
-                && \CleverSay\NetworkSettings::ai_is_configured();
-
+            // ── KB validation step is contributed by the served-response
+            // pipeline below (compute_served_response). That pipeline is
+            // the single source of truth for validator/polish decisions,
+            // and it pushes its own steps into $result['process'] so the
+            // trace shows exactly what production did. Avoiding a second
+            // explicit validate_kb_answer() call here saves ~$0.0003 +
+            // ~200ms per test, since the validator is the same LLM call
+            // either way.
             $top_match = $result['primary_match'] ?? ($result['matches'][0] ?? null);
 
-            if ($validate_aadefault && $top_match
-                && strtolower($top_match['sub_keyword'] ?? '') === 'aadefault'
-            ) {
-                $ai          = new \CleverSay\AI();
-                $kb_answer   = wp_strip_all_tags($top_match['response'] ?? '');
-                $is_relevant = $ai->validate_kb_answer($question, $kb_answer);
-
-                $step_num = count($result['process']) + 1;
-                if ($is_relevant) {
-                    $result['process'][] = [
-                        'step'        => $step_num,
-                        'description' => 'aadefault AI Validation',
-                        'result'      => '✅ AI confirmed this answer is relevant to the question.',
-                        'ai_status'   => 'not_needed',
-                    ];
-                } else {
-                    $result['process'][] = [
-                        'step'        => $step_num,
-                        'description' => 'aadefault AI Validation',
-                        'result'      => '⚠️ AI determined the KB answer does not fit this question — AI fallback would be used instead.',
-                        'ai_status'   => 'would_fire',
-                    ];
-                    // Clear the primary match so the UI shows it was rejected
-                    $result['primary_match']    = null;
-                    $result['aadefault_rejected'] = true;
-                }
-            } elseif ($validate_aadefault && $top_match) {
-                // Match found but not aadefault — note that validation only applies to aadefault
-                $result['process'][] = [
-                    'step'        => count($result['process']) + 1,
-                    'description' => 'aadefault AI Validation',
-                    'result'      => 'Not applicable — match used a specific pattern, not aadefault.',
-                    'ai_status'   => 'not_needed',
-                ];
+            // v4.42.0.3+: run the FULL production pipeline so the inspector
+            // shows the actual user-facing answer (post-validator, post-
+            // polish, post-AI-reroute) along with latency and cost.
+            // Without this, the page only shows pre-validator KB text,
+            // which often differs substantially from what production
+            // serves. Mirrors the live ajax_search Layer 1 → validator
+            // → polish → AI fallback flow via PublicFacing test seams.
+            //
+            // Wall-clock timing reflects the full set of LLM calls made
+            // (validator + polish for KB hits, or full AI synthesis for
+            // fallback). Cost rolls up from the per-call meters in
+            // RequestTimer that the AI class populates.
+            $served = self::compute_served_response($question, $result);
+            if ($served !== null) {
+                $result['served_response'] = $served;
             }
-            
+
             wp_send_json_success($result);
         } catch (\Exception $e) {
             error_log('CleverSay Test Search Exception: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
@@ -1846,6 +3648,182 @@ class Admin {
         } finally {
             error_reporting($old_error_reporting);
         }
+    }
+
+    /**
+     * v4.42.0.3+: helper for ajax_test_search. Runs the full production
+     * pipeline against the question and existing search result, returns
+     * what the user would actually see (final answer HTML, path taken,
+     * latency, cost, tokens). The Ask Question / AI Inspector page
+     * renders this in a new "Served Response" section so operators can
+     * see the complete picture — not just the diagnostic process trace.
+     *
+     * Decision tree mirrors live ajax_search:
+     *   - Layer 1 strong → run_layer1_pipeline_for_test
+     *       (validator + polish + AI reroute on rejection)
+     *   - Layer 1 weak/none → run_ai_fallback_for_test
+     *
+     * Costs and tokens come from RequestTimer fields that AI.php
+     * populates on every call site (synthesis + validator + polish all
+     * roll up under the same per-request meters).
+     *
+     * v4.42.0.4+: passes the existing process trace into the pipeline
+     * by reference so the pipeline can push its own steps (validator
+     * decision, polish run, reroute trigger). This avoids running the
+     * validator twice — once for the trace, once for the served
+     * response — which would cost ~$0.0003 + ~200ms per test on every
+     * Layer 1 hit.
+     *
+     * Returns null if neither path produces an answer (extremely rare —
+     * AI failure or empty KB and empty retrieval).
+     *
+     * @param string $question The user's original query (already sanitized).
+     * @param array  &$result  The Search::test_search() return value;
+     *   process trace appended to in place.
+     * @return array|null
+     */
+    private static function compute_served_response(string $question, array &$result): ?array {
+        $logger = \CleverSay\Logger::instance();
+
+        $matches       = $result['matches'] ?? [];
+        $best_score    = !empty($matches) ? (int) ($matches[0]['score'] ?? 0) : 0;
+        $is_broad_only = !empty($matches) && ($matches[0]['match_type'] ?? '') === 'broad';
+        $ai_min_score  = (int) \CleverSay\NetworkSettings::get_adv_value('min_match_score', 70);
+        $layer1_strong = !empty($matches) && !$is_broad_only && $best_score >= $ai_min_score;
+
+        \CleverSay\RequestTimer::reset();
+        $timer = \CleverSay\RequestTimer::instance();
+        $timer->start_request();
+
+        // Reset retrieval diagnostics so we capture this question's
+        // results, not whatever was left from a prior call.
+        if (method_exists('\\CleverSay\\Retriever', 'clear_last_diagnostics')) {
+            \CleverSay\Retriever::clear_last_diagnostics();
+        }
+
+        $start = microtime(true);
+        $answer = '';
+        $path   = '';
+        $error  = null;
+
+        try {
+            $public = new \CleverSay\PublicFacing();
+
+            if ($layer1_strong && method_exists($public, 'run_layer1_pipeline_for_test')) {
+                // Pass the existing process trace by reference; the
+                // pipeline will push validator/polish/reroute steps
+                // into it for the inspector to display.
+                $process_ref = &$result['process'];
+                $pipeline = $public->run_layer1_pipeline_for_test(
+                    $question,
+                    $matches[0],
+                    $process_ref
+                );
+                $answer   = (string) $pipeline['answer'];
+                $path     = (string) $pipeline['path']; // kb_raw / kb_polished / kb_ai_rerouted
+
+                // If the pipeline rerouted to AI synthesis after
+                // validator rejection, clear primary_match so the
+                // legacy "Matched KB entry" section reflects the
+                // rejected status.
+                if ($path === 'kb_ai_rerouted') {
+                    $result['primary_match'] = null;
+                    $result['kb_rejected_by_validator'] = true;
+                }
+            } elseif (method_exists($public, 'run_ai_fallback_for_test')) {
+                $ai_answer = $public->run_ai_fallback_for_test($question);
+                if ($ai_answer !== null && $ai_answer !== '') {
+                    $answer = (string) $ai_answer;
+                    $path   = !empty($matches) ? 'kb_weak_with_ai' : 'ai_only';
+                } else {
+                    $path = 'no_answer';
+                }
+                // v4.42.0.5+: when the served answer came from AI synth
+                // (not from any KB entry), clear primary_match so the
+                // "Matched KB entry (raw)" section doesn't display a
+                // misleading broad-search artifact that wasn't actually
+                // used to produce the answer. The broad-fallback matches
+                // are still visible in the earlier "Matched..." trace
+                // step (now correctly labeled as fallback), but the
+                // bottom section is reserved for the entry that the
+                // answer is actually grounded in.
+                $result['primary_match'] = null;
+                $result['kb_not_used']   = true;
+            } else {
+                $logger->warning('Inspector served-response: test seams missing on PublicFacing');
+                return null;
+            }
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+            $logger->error('Inspector served-response failed', ['error' => $error]);
+        }
+
+        $total_ms = (int) round((microtime(true) - $start) * 1000);
+
+        // v4.42.0.4+: capture retrieval-side signals (top vector
+        // similarity, top chunk ids, gate status) from the Retriever's
+        // static accessor. Available only when AI fallback ran (Layer 1
+        // strong hits without rejection skip retrieval entirely). When
+        // present, push them into the process trace as a step so the
+        // operator can see what retrieval found without leaving the page.
+        $retrieval_signals = null;
+        if (method_exists('\\CleverSay\\Retriever', 'get_last_diagnostics')) {
+            $diag = \CleverSay\Retriever::get_last_diagnostics();
+            if (is_array($diag)) {
+                $retrieval_signals = [
+                    'top_vector_similarity' => isset($diag['top_vector_similarity'])
+                        ? (float) $diag['top_vector_similarity'] : null,
+                    'top_vector_chunk_id' => isset($diag['top_vector_chunk_id'])
+                        ? (int) $diag['top_vector_chunk_id'] : null,
+                    'top_fulltext_chunk_id' => isset($diag['top_fulltext_chunk_id'])
+                        ? (int) $diag['top_fulltext_chunk_id'] : null,
+                    'vector_count' => isset($diag['vector_count'])
+                        ? (int) $diag['vector_count'] : null,
+                    'fulltext_count' => isset($diag['fulltext_count'])
+                        ? (int) $diag['fulltext_count'] : null,
+                    'overlap_count' => isset($diag['overlap_count'])
+                        ? (int) $diag['overlap_count'] : null,
+                    'returned_count' => isset($diag['returned_count'])
+                        ? (int) $diag['returned_count'] : null,
+                    'gate_triggered' => isset($diag['gate_triggered'])
+                        ? (bool) $diag['gate_triggered'] : null,
+                ];
+
+                // Also append a process step describing the retrieval
+                // results so the trace tells the full story. The
+                // dedicated served-response section will show them as
+                // a structured card too.
+                $sim = $retrieval_signals['top_vector_similarity'];
+                $sim_str = $sim !== null ? number_format($sim, 3) : '—';
+                $vc = $retrieval_signals['vector_count'] ?? 0;
+                $fc = $retrieval_signals['fulltext_count'] ?? 0;
+                $oc = $retrieval_signals['overlap_count'] ?? 0;
+                $gate_str = $retrieval_signals['gate_triggered']
+                    ? '⚠️ gate REJECTED retrieval (top vector similarity below 0.35)'
+                    : '✅ gate accepted';
+                $result['process'][] = [
+                    'step'        => count($result['process']) + 1,
+                    'description' => 'Vector + FULLTEXT retrieval',
+                    'result'      => sprintf(
+                        'Top vector similarity: %s • vector hits: %d • FULLTEXT hits: %d • overlap: %d • %s',
+                        $sim_str, $vc, $fc, $oc, $gate_str
+                    ),
+                    'ai_status'   => $retrieval_signals['gate_triggered'] ? 'no_chunks' : 'not_needed',
+                ];
+            }
+        }
+
+        return [
+            'final_answer_html' => $answer,
+            'path'              => $path,
+            'total_ms'          => $total_ms,
+            'cost'              => $timer->get('cost'),
+            'tokens_in'         => $timer->get('tokens_in'),
+            'tokens_out'        => $timer->get('tokens_out'),
+            'synthesis_model'   => $timer->get('synthesis_model'),
+            'retrieval'         => $retrieval_signals,
+            'error'             => $error,
+        ];
     }
 
     /**
@@ -3653,20 +5631,55 @@ class Admin {
      */
     public static function compute_response_hash(string $response): string {
         // Normalize before hashing so the runtime check isn't fooled
-        // by trivial whitespace differences that don't affect
-        // semantics. SHA-1 is fine here — we're not securing
-        // anything, just detecting "did the content change."
+        // by differences that don't affect what the user actually
+        // reads. SHA-1 is fine here — we're not securing anything,
+        // just detecting "did the content change."
         //
-        // v4.37.65+: also collapse inter-tag whitespace (e.g.,
-        // "<ul>\n\t<li>" → "<ul><li>") because TinyMCE strips that
-        // on its parse-and-reserialize round-trip. Without this,
-        // the hash from Apply (over the LLM's original output with
-        // formatting whitespace) wouldn't match the hash on Save
-        // (over the editor's stripped version). That mismatch was
-        // exactly why polished entries weren't getting marked.
+        // v4.37.65+: collapse inter-tag whitespace because TinyMCE
+        // strips that on its parse-and-reserialize round-trip.
+        //
+        // v4.42.16+: HTML-tag normalization is fundamentally fragile.
+        // TinyMCE's round-trip can reorder attributes, change quote
+        // style, change self-closing tag style, normalize HTML
+        // entities, add or remove "noreferrer" on links, etc. Any of
+        // those changes break a hash computed over HTML. The hash's
+        // job is to detect "did the answer's CONTENT change" — so
+        // we now hash the plain-text content of the response, with
+        // HTML entirely stripped and whitespace collapsed. Two HTMLs
+        // that render to the same plain text produce the same hash.
+        //
+        // Why this is the right tradeoff:
+        //   - Polish doesn't change content semantics; it rewords.
+        //     The polished HTML and the user-visible polished text
+        //     are equivalent for the badge's purpose.
+        //   - TinyMCE round-trip differences become invisible — no
+        //     more "polish_hash wiped because attribute order shifted."
+        //   - Pure-formatting edits (admin adds bold/italic without
+        //     changing words) no longer invalidate the badge. In
+        //     practice this is rare; admins rarely revisit a polished
+        //     entry to change only formatting. The badge meaning
+        //     "this entry has been polished" stays accurate.
+        //   - Real content edits (admin changes wording) DO change
+        //     the plain text and DO invalidate the badge, which is
+        //     the user expectation.
+        //
+        // Forward migration: entries with a stored polished_hash from
+        // before this change will appear unpolished on next page load
+        // (their old hash was computed over HTML; the new hash is
+        // computed over plain text — they won't match). On the next
+        // save of that entry, the preservation logic still recovers
+        // the polished state because: (a) Apply re-runs with the new
+        // hashing, OR (b) the existing-row's stored hash is recomputed
+        // implicitly when admin re-polishes. Worst case: admin clicks
+        // Polish again on an entry whose previous polish hash got
+        // stale; this is cheap and quickly corrects the state.
         $normalized = (string) $response;
-        $normalized = preg_replace('/>\s+</', '><', $normalized);
-        $normalized = preg_replace('/\s+/', ' ', $normalized);
+        // Decode HTML entities so "&amp;" and "&" compare equal.
+        $normalized = html_entity_decode($normalized, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        // Strip all HTML tags — visible text only.
+        $normalized = wp_strip_all_tags($normalized);
+        // Collapse all whitespace including non-breaking spaces.
+        $normalized = preg_replace('/[\s\x{00A0}]+/u', ' ', (string) $normalized);
         $normalized = trim((string) $normalized);
         return sha1($normalized);
     }
@@ -5736,10 +7749,36 @@ Pick the SINGLE keyword that best fits this question's intent. A student would s
             wp_send_json_error(['message' => __('File upload failed. Supported: PDF, DOCX, TXT.', 'cleversay')]);
         }
 
+        // v4.42.30+: Inspect the actual indexing outcome before deciding
+        // what to report. add_file() runs the indexer synchronously, so
+        // by the time we return here the source's status is final —
+        // either 'indexed' (success), 'error' (extraction failed), or
+        // 'indexing' if something stalled. Previously this handler
+        // ALWAYS returned the optimistic "File uploaded. Indexing in
+        // progress…" message even when extraction had already failed
+        // with an error visible in the source list below the toast.
+        // That mismatch caused admins to assume success and walk away.
         $source = $this->require_ai_sources()->get($id);
+        $status = is_array($source) ? ($source['status'] ?? '') : '';
+
+        if ($status === 'error') {
+            $err_msg = is_array($source) ? (string) ($source['error_message'] ?? '') : '';
+            $base    = __('File uploaded but indexing failed:', 'cleversay');
+            wp_send_json_error([
+                'message' => trim($base . ' ' . $err_msg),
+                'source'  => $source,
+                'status'  => 'error',
+            ]);
+        }
+
+        $message = ($status === 'indexed')
+            ? __('File uploaded and indexed successfully.', 'cleversay')
+            : __('File uploaded. Indexing in progress…', 'cleversay');
+
         wp_send_json_success([
-            'message' => __('File uploaded. Indexing in progress…', 'cleversay'),
+            'message' => $message,
             'source'  => $source,
+            'status'  => $status,
         ]);
     }
 
@@ -5798,6 +7837,7 @@ Pick the SINGLE keyword that best fits this question's intent. A student would s
             'message' => sprintf(_n('%d source deleted.', '%d sources deleted.', $deleted, 'cleversay'), $deleted),
         ]);
     }
+
 
     public function ajax_reindex_source(): void {
         check_ajax_referer('cleversay_admin_nonce', 'nonce');
@@ -6928,6 +8968,12 @@ AI answer: "Residence halls open on August 20th for new students."
         update_option('cleversay_track_source_usage', isset($_POST['track_source_usage']));
         // v4.37.89+: Source citations add-on (per-site enable). Default off.
         update_option('cleversay_citations_enabled', isset($_POST['cleversay_citations_enabled']));
+        // v4.41.5.8+: per-site debug toggle. When on, the embed widget
+        // appends a small "Response time: Xs (server: Ys)" subtitle below
+        // each bot answer. Default off — only enable on testing/staging
+        // tenants. Stored as a standalone option (not in cleversay_options)
+        // so the embed-config endpoint can read it cheaply via get_option.
+        update_option('cleversay_show_timing', isset($_POST['show_timing']) ? 1 : 0);
 
         // AI settings (field names match what the settings view actually sends)
         update_option('cleversay_ai_enabled',           isset($_POST['ai_enabled']) ? 1 : 0);
@@ -6936,9 +8982,16 @@ AI answer: "Residence halls open on August 20th for new students."
         // is the typical preference). Off-by-default would mean existing sites
         // start without this on upgrade, but we want them to benefit immediately.
         update_option('cleversay_ai_followup_suggestions', isset($_POST['ai_followup_suggestions']) ? 1 : 0);
+        // v4.41.5.9+: per-site rewriter toggle. Default true (matches
+        // pre-v4.41.5.9 behavior) — operator opts out on tenants where
+        // users ask self-contained questions and the rewriter creates
+        // more confusion than value.
+        update_option('cleversay_ai_query_rewriter', isset($_POST['ai_query_rewriter']) ? 1 : 0);
         update_option('cleversay_ai_model',             sanitize_text_field($_POST['ai_model']        ?? 'claude-haiku-4-5-20251001'));
         update_option('cleversay_ai_monthly_budget',    (float)($_POST['ai_monthly_budget']           ?? 0));
-        update_option('cleversay_ai_max_chunks',        max(1, min(10, (int)($_POST['ai_max_chunks']  ?? 4))));
+        // v4.41.0+: default 6 (Indexer::MAX_CHUNKS) — was 4, mismatched
+        // the constant. See Bug 6 in the v4.41.0 handoff brief.
+        update_option('cleversay_ai_max_chunks',        max(1, min(10, (int)($_POST['ai_max_chunks']  ?? \CleverSay\Indexer::MAX_CHUNKS))));
         update_option('cleversay_ai_max_tokens',        max(200, min(2000, (int)($_POST['ai_max_tokens'] ?? 800))));
         update_option('cleversay_ai_min_score',         max(0, min(100, (int)($_POST['ai_min_score']  ?? 0))));
         update_option('cleversay_ai_tiebreak_min_score',max(0, min(500, (int)($_POST['ai_tiebreak_min_score'] ?? 100))));

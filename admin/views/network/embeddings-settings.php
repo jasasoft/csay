@@ -257,105 +257,15 @@ if (!defined('ABSPATH')) exit;
     </div>
 
     <?php
-    // Phase 2: Queue status panel — only meaningful when feature is enabled.
-    // Shown regardless so admins can see "0 pending / 0 done" state too.
-    if (\CleverSay\Supabase::is_enabled() && !is_network_admin()
-        || (\CleverSay\Supabase::is_enabled() && is_network_admin() && get_current_blog_id())):
-        // Embedder is per-site; in network admin, get_current_blog_id() is
-        // typically the network main site (ID 1). Show stats for whichever
-        // site context we're in.
-        try {
-            $stats = (new \CleverSay\Embedder())->get_queue_stats();
-        } catch (\Throwable $e) {
-            $stats = ['error' => $e->getMessage()];
-        }
+    // v4.41.0+: Multi-site overview replaces the old single-site status
+    // panel and action buttons. The previous panel rendered in the
+    // network admin's blog context (typically blog 1, the network main
+    // site), which gave operators misleading numbers about whichever
+    // tenant they intended to inspect. Per-tenant operations now live
+    // on the new per-site Embeddings admin page. See Bugs 1, 2, 3 in
+    // the v4.41.0 handoff brief.
+    if (\CleverSay\Supabase::is_enabled()) {
+        include CLEVERSAY_PLUGIN_DIR . 'admin/views/network/embeddings-overview.php';
+    }
     ?>
-    <div class="cleversay-table-card" style="margin-bottom:20px;">
-        <div style="padding:14px 18px;border-bottom:1px solid rgba(0,0,0,0.06);">
-            <h3 style="margin:0;font-size:14px;font-weight:600;">
-                <?php echo \CleverSay\Icons::render('database', 16); ?>
-                <?php esc_html_e('Embedding Status (Site ', 'cleversay');
-                echo (int) get_current_blog_id();
-                esc_html_e(')', 'cleversay'); ?>
-            </h3>
-        </div>
-        <div style="padding:14px 18px;">
-            <?php if (isset($stats['error'])): ?>
-                <p class="notice notice-error" style="margin:0;padding:10px;">
-                    <?php esc_html_e('Could not load stats: ', 'cleversay'); ?>
-                    <code><?php echo esc_html($stats['error']); ?></code>
-                </p>
-            <?php else: ?>
-                <table class="widefat striped" style="margin-bottom:12px;">
-                    <tbody>
-                        <tr>
-                            <td style="width:40%;"><strong><?php esc_html_e('KB Entries', 'cleversay'); ?></strong></td>
-                            <td>
-                                <?php echo (int) ($stats['embedded_kb_entries'] ?? 0); ?> /
-                                <?php echo (int) ($stats['total_kb_entries'] ?? 0); ?>
-                                <?php esc_html_e('embedded', 'cleversay'); ?>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td><strong><?php esc_html_e('Source Chunks', 'cleversay'); ?></strong></td>
-                            <td>
-                                <?php echo (int) ($stats['embedded_chunks'] ?? 0); ?> /
-                                <?php echo (int) ($stats['total_chunks'] ?? 0); ?>
-                                <?php esc_html_e('embedded', 'cleversay'); ?>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td><strong><?php esc_html_e('Queue: Pending', 'cleversay'); ?></strong></td>
-                            <td><?php echo (int) ($stats['pending'] ?? 0); ?></td>
-                        </tr>
-                        <tr>
-                            <td><strong><?php esc_html_e('Queue: Processing', 'cleversay'); ?></strong></td>
-                            <td><?php echo (int) ($stats['processing'] ?? 0); ?></td>
-                        </tr>
-                        <tr>
-                            <td><strong><?php esc_html_e('Queue: Failed', 'cleversay'); ?></strong></td>
-                            <td>
-                                <?php echo (int) ($stats['failed'] ?? 0); ?>
-                                <?php if (!empty($stats['failed'])): ?>
-                                    <em><?php esc_html_e('(retried max times — use Retry Failed below)', 'cleversay'); ?></em>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-
-                <p class="description" style="margin-bottom:12px;">
-                    <?php esc_html_e('The processor runs every 5 minutes via WP-Cron. With cPanel system cron pointing at wp-cron.php, processing is reliable. Without it, processing depends on site traffic.', 'cleversay'); ?>
-                </p>
-
-                <form method="post" action="" style="display:inline-block;margin-right:8px;"
-                      onsubmit="return confirm('<?php echo esc_js(__('Queue ALL existing KB entries and source chunks for embedding generation. This is a one-time backfill. Safe to run multiple times. Proceed?', 'cleversay')); ?>');">
-                    <?php wp_nonce_field('cleversay_supabase_backfill', 'cleversay_supabase_backfill_nonce'); ?>
-                    <button type="submit" name="cleversay_supabase_action" value="backfill"
-                            class="button button-primary">
-                        <?php esc_html_e('Backfill All Existing Content', 'cleversay'); ?>
-                    </button>
-                </form>
-
-                <form method="post" action="" style="display:inline-block;margin-right:8px;">
-                    <?php wp_nonce_field('cleversay_supabase_process_now', 'cleversay_supabase_process_now_nonce'); ?>
-                    <button type="submit" name="cleversay_supabase_action" value="process_now"
-                            class="button">
-                        <?php esc_html_e('Process Queue Now', 'cleversay'); ?>
-                    </button>
-                </form>
-
-                <?php if (!empty($stats['failed'])): ?>
-                <form method="post" action="" style="display:inline-block;">
-                    <?php wp_nonce_field('cleversay_supabase_retry_failed', 'cleversay_supabase_retry_failed_nonce'); ?>
-                    <button type="submit" name="cleversay_supabase_action" value="retry_failed"
-                            class="button">
-                        <?php esc_html_e('Retry Failed Jobs', 'cleversay'); ?>
-                    </button>
-                </form>
-                <?php endif; ?>
-            <?php endif; ?>
-        </div>
-    </div>
-    <?php endif; ?>
 </div>

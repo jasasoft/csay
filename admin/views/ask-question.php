@@ -71,25 +71,42 @@ if (!defined('ABSPATH')) {
                 </h2>
                 <div id="cleversay-process-steps" class="cleversay-process-steps"></div>
             </div>
-            
-            <!-- Response Section -->
-            <div class="cleversay-result-section cleversay-response-section">
+
+            <!-- v4.42.0.3+: Served Response Section.
+                 Shows the actual user-facing answer after the full pipeline
+                 (validator + polish + AI reroute) plus latency and cost.
+                 Hidden by default; populated by JS only when the AJAX
+                 response includes a served_response payload. -->
+            <div class="cleversay-result-section cleversay-served-section" style="display:none;">
                 <h2>
                     <?php echo \CleverSay\Icons::render('message-circle', 16); ?>
-                    <?php esc_html_e('Response', 'cleversay'); ?>
+                    <?php esc_html_e('AI answer (served)', 'cleversay'); ?>
+                    <span id="cleversay-served-path-badge" style="margin-left:10px;font-size:11px;font-weight:500;padding:2px 8px;border-radius:10px;background:#e8f0fb;color:#2271b1;vertical-align:middle;"></span>
+                </h2>
+                <div id="cleversay-served-meta" style="margin-bottom:12px;font-size:12px;color:#555;display:flex;gap:18px;flex-wrap:wrap;">
+                    <span><strong><?php esc_html_e('Latency', 'cleversay'); ?>:</strong> <span id="cleversay-served-ms">—</span></span>
+                    <span><strong><?php esc_html_e('Cost', 'cleversay'); ?>:</strong> <span id="cleversay-served-cost">—</span></span>
+                    <span><strong><?php esc_html_e('Tokens', 'cleversay'); ?>:</strong> <span id="cleversay-served-tokens">—</span></span>
+                    <span><strong><?php esc_html_e('Model', 'cleversay'); ?>:</strong> <span id="cleversay-served-model">—</span></span>
+                </div>
+                <div id="cleversay-served-answer" class="cleversay-response-content"></div>
+            </div>
+
+            <!-- Response Section: shows the matched KB entry verbatim
+                 (pre-validator). Renamed for clarity in the UI; keeps
+                 the same DOM hooks for back-compat with existing JS. -->
+            <div class="cleversay-result-section cleversay-response-section">
+                <h2>
+                    <?php echo \CleverSay\Icons::render('database', 16); ?>
+                    <?php esc_html_e('Matched KB entry (raw)', 'cleversay'); ?>
                 </h2>
                 <div id="cleversay-response-content" class="cleversay-response-content"></div>
             </div>
-            
-            <!-- Related Section -->
-            <div class="cleversay-result-section cleversay-related-section" style="display: none;">
-                <h2>
-                    <?php echo \CleverSay\Icons::render('link', 16); ?>
-                    <?php esc_html_e('You May Also Be Interested In...', 'cleversay'); ?>
-                </h2>
-                <div id="cleversay-related-content" class="cleversay-related-content"></div>
-            </div>
-            
+
+            <!-- v4.42.0.4+: "You May Also Be Interested In" / Related
+                 Questions section removed per operator request — the
+                 feature is no longer in use. -->
+
         </div>
 
         <!-- Loading Indicator -->
@@ -310,39 +327,7 @@ if (!defined('ABSPATH')) {
     vertical-align: text-bottom;
 }
 
-/* Related Questions */
-.cleversay-related-content {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-}
-
-.cleversay-related-item {
-    padding: 10px 0;
-    border-bottom: 1px solid #e2e4e7;
-}
-
-.cleversay-related-item:last-child {
-    border-bottom: none;
-}
-
-.cleversay-related-item a {
-    color: #2271b1;
-    text-decoration: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.cleversay-related-item a:hover {
-    color: #135e96;
-    text-decoration: underline;
-}
-
-.cleversay-related-item a::before {
-    content: "»";
-    font-weight: bold;
-}
+/* v4.42.0.4+: Related Questions CSS removed — feature retired. */
 
 /* Loading & No Results */
 .cleversay-ask-loading {
@@ -569,7 +554,71 @@ jQuery(document).ready(function($) {
         // Response Content
         const responseContainer = $('#cleversay-response-content');
         responseContainer.empty();
-        
+
+        // v4.42.0.3+: Served Response section — shows the actual answer
+        // the user would see (post-validator, post-polish, post-reroute).
+        // Populated only when the server included a served_response
+        // payload; hidden otherwise so older responses don't show stale
+        // sections.
+        const servedSection = $('.cleversay-served-section');
+        if (data.served_response && (data.served_response.final_answer_html || data.served_response.path === 'no_answer')) {
+            const sr = data.served_response;
+            const pathLabels = {
+                'kb_polished':     {label: 'Polished KB',         color: '#1f5e9c', bg: '#e8f0fb'},
+                'kb_raw':          {label: 'Raw KB',              color: '#1f5e9c', bg: '#e8f0fb'},
+                'kb_ai_rerouted':  {label: 'KB rejected → AI',    color: '#856404', bg: '#fff3cd'},
+                'kb_weak_with_ai': {label: 'Weak KB + AI synth',  color: '#856404', bg: '#fff3cd'},
+                'ai_only':         {label: 'AI synthesis only',   color: '#856404', bg: '#fff3cd'},
+                'no_answer':       {label: 'No answer',           color: '#666',    bg: '#f0f0f1'}
+            };
+            const meta = pathLabels[sr.path] || {label: sr.path || '', color:'#333', bg:'#f9f9f9'};
+            const $badge = $('#cleversay-served-path-badge');
+            $badge.text(meta.label).css({color: meta.color, background: meta.bg});
+
+            // Latency
+            let msText = '—';
+            if (sr.total_ms !== null && sr.total_ms !== undefined) {
+                msText = sr.total_ms < 1000
+                    ? Math.round(sr.total_ms) + ' ms'
+                    : (sr.total_ms / 1000).toFixed(2) + ' s';
+            }
+            $('#cleversay-served-ms').text(msText);
+
+            // Cost
+            $('#cleversay-served-cost').text(
+                (sr.cost !== null && sr.cost !== undefined && !isNaN(sr.cost))
+                    ? '$' + Number(sr.cost).toFixed(4)
+                    : '—'
+            );
+
+            // Tokens
+            const tIn  = (sr.tokens_in  !== null && sr.tokens_in  !== undefined) ? sr.tokens_in  : '—';
+            const tOut = (sr.tokens_out !== null && sr.tokens_out !== undefined) ? sr.tokens_out : '—';
+            $('#cleversay-served-tokens').text(tIn + ' in / ' + tOut + ' out');
+
+            // Model
+            $('#cleversay-served-model').text(sr.synthesis_model || '—');
+
+            // Answer body. The pipeline returns HTML for KB paths and
+            // mostly-HTML (with some markdown) for AI paths. We render
+            // it as-is — same as the live widget does — to preserve
+            // links, lists, and formatting from KB entries.
+            const answerEl = $('#cleversay-served-answer');
+            if (sr.path === 'no_answer' || !sr.final_answer_html) {
+                answerEl.html('<em style="color:#666;">No answer would be served. ' +
+                              'The widget would show the configured no-answer message.</em>');
+            } else if (sr.error) {
+                answerEl.html('<div style="color:#d63638;background:#fce4e4;border:1px solid #f5aca6;padding:10px;border-radius:4px;">' +
+                              '<strong>Pipeline error:</strong> ' + escapeHtml(sr.error) +
+                              '</div>');
+            } else {
+                answerEl.html(sr.final_answer_html);
+            }
+            servedSection.show();
+        } else {
+            servedSection.hide();
+        }
+
         if (data.primary_match) {
             const match = data.primary_match;
             let responseHtml = '<div class="cleversay-response-question">' + escapeHtml(match.question);
@@ -577,44 +626,52 @@ jQuery(document).ready(function($) {
             responseHtml += '<?php echo \CleverSay\Icons::render('edit', 16); ?> <?php echo esc_js(__('Edit', 'cleversay')); ?></a>';
             responseHtml += '</div>';
             responseHtml += '<div class="cleversay-response-answer">' + match.response + '</div>';
-            
+
             if (match.updated_at) {
                 responseHtml += '<div class="cleversay-response-meta">';
                 responseHtml += '<?php echo \CleverSay\Icons::render('clock', 16); ?> ';
                 responseHtml += '<?php echo esc_js(__('Last updated on', 'cleversay')); ?> ' + formatDate(match.updated_at);
                 responseHtml += '</div>';
             }
-            
+
             responseContainer.html(responseHtml);
+            $('.cleversay-response-section').show();
+        } else if (data.kb_not_used) {
+            // v4.42.0.5+: when no KB entry was used to produce the served
+            // answer (AI synthesized from chunks instead), show a note
+            // explaining why the section is empty rather than displaying
+            // a misleading broad-search artifact. The actual answer is
+            // visible in the "AI answer (served)" section above.
+            responseContainer.html(
+                '<div style="padding:14px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:4px;color:#50575e;font-style:italic;">' +
+                'No KB entry was used to produce the answer above — it was synthesized by AI from indexed source chunks. ' +
+                'Any KB entries listed under "Matched..." in the Process trace are broad-search fallback hits, ' +
+                'not the source of the served answer.' +
+                '</div>'
+            );
             $('.cleversay-response-section').show();
         } else {
             $('.cleversay-response-section').hide();
         }
         
-        // Related Questions
-        const relatedContainer = $('#cleversay-related-content');
-        const relatedSection = $('.cleversay-related-section');
-        relatedContainer.empty();
+        // v4.42.0.4+: Related Questions / "You May Also Be Interested In..."
+        // section removed per operator request. The feature is no longer
+        // in use in the live widget, so showing it on the inspector page
+        // is misleading.
         
-        if (data.related && data.related.length > 0) {
-            data.related.forEach(function(item) {
-                relatedContainer.append(
-                    '<div class="cleversay-related-item">' +
-                    '<a href="#" class="cleversay-related-link" data-question="' + escapeHtml(item.question) + '">' +
-                    escapeHtml(item.question) +
-                    '</a></div>'
-                );
-            });
-            relatedSection.show();
-        } else {
-            relatedSection.hide();
-        }
-        
-        // Show no results if needed
-        if (!data.success || !data.primary_match) {
+        // Show "no results" feedback only when nothing useful was produced
+        // at all (Layer 1 found nothing AND AI synthesis produced nothing).
+        // v4.42.0.5+: previously this block fired whenever primary_match
+        // was empty, which overwrote the kb_not_used explanation note
+        // for AI-synthesized answers — making the page incorrectly say
+        // "no matching entries" even when the user got a real AI answer.
+        const aiServedSomething = data.served_response
+            && data.served_response.final_answer_html
+            && data.served_response.path !== 'no_answer';
+        if ((!data.success || !data.primary_match) && !aiServedSomething && !data.kb_not_used) {
             const suggestionsContainer = $('#cleversay-suggestions');
             suggestionsContainer.empty();
-            
+
             if (data.suggested && data.suggested.length > 0) {
                 suggestionsContainer.append('<div class="cleversay-suggestions-title"><?php echo esc_js(__('Did you mean:', 'cleversay')); ?></div>');
                 data.suggested.forEach(function(suggestion) {
@@ -624,7 +681,7 @@ jQuery(document).ready(function($) {
                     );
                 });
             }
-            
+
             // Show "no match" message in response section
             const responseContainer = $('#cleversay-response-content');
             responseContainer.html('<div class="cleversay-no-match-message"><?php echo \CleverSay\Icons::render('alert-triangle', 16); ?> <?php echo esc_js(__('No matching entries found based on the search criteria above.', 'cleversay')); ?></div>');
@@ -633,7 +690,7 @@ jQuery(document).ready(function($) {
     }
     
     // Handle clicking on related/suggested questions
-    $(document).on('click', '.cleversay-related-link, .cleversay-suggestion-link', function(e) {
+    $(document).on('click', '.cleversay-suggestion-link', function(e) {
         e.preventDefault();
         const question = $(this).data('question');
         input.val(question);

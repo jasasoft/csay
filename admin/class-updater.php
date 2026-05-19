@@ -36,6 +36,11 @@ class Updater {
     /** Max daily snapshots to keep */
     public const DAILY_KEEP = 7;
 
+    /** Max manual snapshots to keep. v4.42.26+: user has local backups
+     *  before each upload, so accumulating unlimited manual snapshots
+     *  here just bloats the dashboard list. */
+    public const MANUAL_KEEP = 7;
+
     public function __construct() {
         $upload_dir        = wp_upload_dir();
         $this->prod_dir    = WP_PLUGIN_DIR . '/cleversay';
@@ -227,9 +232,17 @@ class Updater {
         $this->zip_directory($zip, $this->prod_dir, 'cleversay');
         $zip->close();
 
-        // Enforce retention for daily snapshots
+        // Enforce retention.
+        // - Daily: keep DAILY_KEEP newest
+        // - Manual: v4.42.26+, keep MANUAL_KEEP newest. Previously
+        //   manual snapshots accumulated indefinitely, which produced
+        //   long lists on the network dashboard. Per-user policy:
+        //   admins keep their own local backups before each upload,
+        //   so server-side retention of the last 7 is plenty.
         if ($type === 'daily') {
             $this->enforce_retention($dir, self::DAILY_KEEP);
+        } elseif ($type === 'manual') {
+            $this->enforce_retention($dir, self::MANUAL_KEEP);
         }
 
         return [

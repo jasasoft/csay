@@ -71,6 +71,35 @@ class NetworkAdmin {
             return;
         }
 
+        // v4.41.5.4+: Test Synthesis Model — diagnostic one-shot call
+        // against whatever model is currently saved as synthesis_model.
+        // Result is stashed in a transient and rendered inline on the
+        // AI settings view. Must be checked BEFORE the AI Settings save
+        // because both forms POST to the same admin URL.
+        if (isset($_POST['cleversay_test_synthesis_nonce'])
+            && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_test_synthesis_nonce'])), 'cleversay_test_synthesis')
+            && ($_POST['cleversay_ai_action'] ?? '') === 'test_synthesis'
+        ) {
+            try {
+                $ai     = new \CleverSay\AI();
+                $result = $ai->test_synthesis();
+            } catch (\Throwable $e) {
+                $result = [
+                    'success'    => false,
+                    'error'      => 'Exception during test: ' . $e->getMessage(),
+                    'latency_ms' => 0,
+                    'model'      => '',
+                    'synthesis_provider' => 'unknown',
+                ];
+            }
+            set_transient('cleversay_synthesis_test_result', $result, 60);
+            wp_redirect(add_query_arg(
+                ['page' => 'cleversay-network-ai', 'synthesis_tested' => '1'],
+                network_admin_url('admin.php')
+            ));
+            exit;
+        }
+
         // AI Settings save
         if (isset($_POST['cleversay_network_ai_nonce'])
             && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_network_ai_nonce'])), 'cleversay_network_ai')
@@ -133,132 +162,13 @@ class NetworkAdmin {
             exit;
         }
 
-        // Embeddings: Backfill All Existing Content (Phase 2)
-        // Iterates every site so chunks/KB entries are read from the
-        // correct per-site tables AND queued under the right blog
-        // context. Without switch_to_blog, all jobs run in blog 1's
-        // context and tag rows with tenant_id='1'. (Bug fixed in v4.40.1.)
-        if (isset($_POST['cleversay_supabase_backfill_nonce'])
-            && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_backfill_nonce'])), 'cleversay_supabase_backfill')
-            && ($_POST['cleversay_supabase_action'] ?? '') === 'backfill'
-        ) {
-            $counts = ['kb_entries' => 0, 'chunks' => 0];
-            if (is_multisite()) {
-                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
-                foreach ($sites as $site_id) {
-                    switch_to_blog((int) $site_id);
-                    try {
-                        $r = (new \CleverSay\Embedder())->backfill_all();
-                        $counts['kb_entries'] += (int) ($r['kb_entries'] ?? 0);
-                        $counts['chunks']     += (int) ($r['chunks'] ?? 0);
-                    } catch (\Throwable $e) {
-                        \CleverSay\Logger::instance()->error('Backfill failed for site', [
-                            'site_id' => $site_id,
-                            'error'   => $e->getMessage(),
-                        ]);
-                    }
-                    restore_current_blog();
-                }
-            } else {
-                $counts = (new \CleverSay\Embedder())->backfill_all();
-            }
-            set_transient('cleversay_supabase_test_result', [
-                'success' => true,
-                'message' => sprintf(
-                    /* translators: 1: KB entry count, 2: chunk count */
-                    __('Queued %1$d KB entries and %2$d source chunks for embedding. Processing happens via WP-Cron.', 'cleversay'),
-                    (int) ($counts['kb_entries'] ?? 0),
-                    (int) ($counts['chunks'] ?? 0)
-                ),
-                'details' => $counts,
-            ], 60);
-            wp_redirect(add_query_arg(['page' => 'cleversay-network-embeddings', 'test_result' => '1'], network_admin_url('admin.php')));
-            exit;
-        }
-
-        // Embeddings: Process Queue Now (Phase 2)
-        // Same multisite fix as Backfill — must iterate per site so each
-        // site's queue is read and processed under the correct blog
-        // context, ensuring the right tenant_id is written to Supabase.
-        // (Bug fixed in v4.40.1.)
-        if (isset($_POST['cleversay_supabase_process_now_nonce'])
-            && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_process_now_nonce'])), 'cleversay_supabase_process_now')
-            && ($_POST['cleversay_supabase_action'] ?? '') === 'process_now'
-        ) {
-            $stats = ['processed' => 0, 'succeeded' => 0, 'failed' => 0];
-            if (is_multisite()) {
-                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
-                foreach ($sites as $site_id) {
-                    switch_to_blog((int) $site_id);
-                    try {
-                        $s = (new \CleverSay\Embedder())->process_queue();
-                        $stats['processed'] += (int) ($s['processed'] ?? 0);
-                        $stats['succeeded'] += (int) ($s['succeeded'] ?? 0);
-                        $stats['failed']    += (int) ($s['failed']    ?? 0);
-                    } catch (\Throwable $e) {
-                        \CleverSay\Logger::instance()->error('Process queue failed for site', [
-                            'site_id' => $site_id,
-                            'error'   => $e->getMessage(),
-                        ]);
-                    }
-                    restore_current_blog();
-                }
-            } else {
-                $stats = (new \CleverSay\Embedder())->process_queue();
-            }
-            set_transient('cleversay_supabase_test_result', [
-                'success' => true,
-                'message' => sprintf(
-                    /* translators: 1: processed, 2: succeeded, 3: failed */
-                    __('Processed %1$d jobs: %2$d succeeded, %3$d failed.', 'cleversay'),
-                    (int) $stats['processed'],
-                    (int) $stats['succeeded'],
-                    (int) $stats['failed']
-                ),
-                'details' => $stats,
-            ], 60);
-            wp_redirect(add_query_arg(['page' => 'cleversay-network-embeddings', 'test_result' => '1'], network_admin_url('admin.php')));
-            exit;
-        }
-
-        // Embeddings: Retry Failed Jobs (Phase 2)
-        // Same multisite fix as Backfill / Process Now — each site has
-        // its own queue table, so we must run the retry under each
-        // site's blog context. (Bug fixed in v4.40.1.)
-        if (isset($_POST['cleversay_supabase_retry_failed_nonce'])
-            && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cleversay_supabase_retry_failed_nonce'])), 'cleversay_supabase_retry_failed')
-            && ($_POST['cleversay_supabase_action'] ?? '') === 'retry_failed'
-        ) {
-            $reset = 0;
-            if (is_multisite()) {
-                $sites = get_sites(['number' => 0, 'fields' => 'ids']);
-                foreach ($sites as $site_id) {
-                    switch_to_blog((int) $site_id);
-                    try {
-                        $reset += (int) (new \CleverSay\Embedder())->retry_failed_jobs();
-                    } catch (\Throwable $e) {
-                        \CleverSay\Logger::instance()->error('Retry failed jobs failed for site', [
-                            'site_id' => $site_id,
-                            'error'   => $e->getMessage(),
-                        ]);
-                    }
-                    restore_current_blog();
-                }
-            } else {
-                $reset = (int) (new \CleverSay\Embedder())->retry_failed_jobs();
-            }
-            set_transient('cleversay_supabase_test_result', [
-                'success' => true,
-                'message' => sprintf(
-                    /* translators: number of failed jobs reset */
-                    __('Reset %d failed jobs to pending. They will retry on the next cron run.', 'cleversay'),
-                    (int) $reset
-                ),
-                'details' => ['reset' => $reset],
-            ], 60);
-            wp_redirect(add_query_arg(['page' => 'cleversay-network-embeddings', 'test_result' => '1'], network_admin_url('admin.php')));
-            exit;
-        }
+        // v4.41.0+: The backfill / process_now / retry_failed handlers
+        // that previously lived here have moved to the per-site admin
+        // (handled in Admin::handle_site_embeddings_actions). They're
+        // inherently per-tenant operations — running them in network
+        // admin context iterated every blog (including blog 1 which is
+        // not a CleverSay tenant on this network), producing stranded
+        // rows in Supabase. See Bugs 1, 2, 3 in the v4.41.0 handoff brief.
 
         // Custom CSS save
         if (isset($_POST['cleversay_custom_css_nonce'])
@@ -617,11 +527,14 @@ class NetworkAdmin {
         // that hasn't migrated to get_ai_config — write it as the
         // currently-active provider's key so older code paths still
         // work transparently.
+        //
+        // v4.42.2+: three providers now. Same preserve-on-empty pattern
+        // applies to all three keys.
         $anthropic_key = sanitize_text_field(wp_unslash($_POST['anthropic_api_key'] ?? ''));
         $gemini_key    = sanitize_text_field(wp_unslash($_POST['gemini_api_key']    ?? ''));
+        $openai_key    = sanitize_text_field(wp_unslash($_POST['openai_api_key']    ?? ''));
         $model         = sanitize_text_field(wp_unslash($_POST['model'] ?? 'claude-haiku-4-5-20251001'));
         $active_prov   = NetworkSettings::provider_for_model($model);
-        $active_key    = $active_prov === 'gemini' ? $gemini_key : $anthropic_key;
 
         // Preserve any existing per-provider key when its field came in
         // empty — empty submission shouldn't wipe a saved key, only an
@@ -630,16 +543,49 @@ class NetworkAdmin {
         $existing = NetworkSettings::get_ai();
         if ($anthropic_key === '') $anthropic_key = (string) ($existing['anthropic_api_key'] ?? '');
         if ($gemini_key    === '') $gemini_key    = (string) ($existing['gemini_api_key']    ?? '');
-        // Re-derive active_key after preservation in case the active
-        // field came in empty.
-        $active_key = $active_prov === 'gemini' ? $gemini_key : $anthropic_key;
+        if ($openai_key    === '') $openai_key    = (string) ($existing['openai_api_key']    ?? '');
+
+        // Resolve active_key from the (possibly preserved) per-provider
+        // values, based on the current default-model's provider.
+        $active_key = match ($active_prov) {
+            'gemini' => $gemini_key,
+            'openai' => $openai_key,
+            default  => $anthropic_key,
+        };
 
         $data = [
             'api_key'            => $active_key,
             'anthropic_api_key'  => $anthropic_key,
             'gemini_api_key'     => $gemini_key,
+            'openai_api_key'     => $openai_key,
             'model'              => $model,
-            'max_tokens'         => (int) ($_POST['max_tokens'] ?? 450),
+            // v4.41.5.2+: synthesis_model is the model used for the
+            // chat-answer call (answer_with_context). Read from POST if
+            // the form provided it (the new dropdown does), otherwise
+            // preserve the existing saved value rather than letting
+            // save_ai() reset it to the schema default. Without this
+            // preservation, every save of the AI settings page would
+            // silently flip synthesis_model back to default.
+            'synthesis_model'    => isset($_POST['synthesis_model'])
+                ? sanitize_text_field(wp_unslash($_POST['synthesis_model']))
+                : (string) ($existing['synthesis_model'] ?? 'claude-sonnet-4-5-20250929'),
+            // v4.41.5.7+: validator_model now has a UI dropdown (added
+            // in this version). Read from POST when the form provided
+            // it, fall back to the existing saved value when missing
+            // (e.g., if a future form variant doesn't render this
+            // field). Preserves the no-silent-reset guarantee from
+            // v4.41.5.2.
+            'validator_model'    => isset($_POST['validator_model'])
+                ? sanitize_text_field(wp_unslash($_POST['validator_model']))
+                : (string) ($existing['validator_model'] ?? 'claude-sonnet-4-5-20250929'),
+            // v4.42.1+: polish_model selector. Polish rewrites accepted
+            // KB answers in tenant tone — constrained transformation
+            // that defaults to the smaller model. Same no-silent-reset
+            // preservation pattern as the other model selectors above.
+            'polish_model'       => isset($_POST['polish_model'])
+                ? sanitize_text_field(wp_unslash($_POST['polish_model']))
+                : (string) ($existing['polish_model'] ?? 'claude-haiku-4-5-20251001'),
+            'max_tokens'         => (int) ($_POST['max_tokens'] ?? 1000),
             'ai_enabled'         => !empty($_POST['ai_enabled']),
             'monthly_budget'     => (float) ($_POST['monthly_budget'] ?? 0),
             'fallback_threshold' => (int) ($_POST['fallback_threshold'] ?? 70),
@@ -856,14 +802,35 @@ class NetworkAdmin {
         remove_menu_page('index.php');             // Dashboard
         remove_menu_page('plugins.php');           // Plugins
 
-        // Move CleverSay to position 0 (first item)
+        // Move CleverSay to position 0 (first item), and CleverSay Tools
+        // immediately after at position 0.1. Done in one pass: identify
+        // both menus, then reassign their array keys.
+        //
+        // v4.42.21+: Tools menu was previously left at its registered
+        // position '30.1' when CleverSay got moved to 0. With other
+        // WordPress menus (Media at 10, Pages at 20) sitting between
+        // them, the two menus appeared split apart in the sidebar.
+        // Relocating Tools alongside CleverSay keeps them together
+        // regardless of what else is registered.
         global $menu;
+        $cleversay_item = null;
+        $tools_item     = null;
         foreach ($menu as $pos => $item) {
-            if (isset($item[2]) && $item[2] === 'cleversay') {
-                $menu[0] = $item;
+            if (!isset($item[2])) continue;
+            if ($item[2] === 'cleversay') {
+                $cleversay_item = $item;
                 unset($menu[$pos]);
-                break;
+            } elseif ($item[2] === 'cs-tools') {
+                $tools_item = $item;
+                unset($menu[$pos]);
             }
+        }
+        if ($cleversay_item !== null) {
+            $menu[0] = $cleversay_item;
+        }
+        if ($tools_item !== null) {
+            // String key preserves the fractional sort position.
+            $menu['0.1'] = $tools_item;
         }
         ksort($menu);
     }

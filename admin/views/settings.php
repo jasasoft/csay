@@ -1344,7 +1344,37 @@ $snippet    = "<script>\n(function(w,d,s){\n  var j=d.createElement(s);j.async=t
                         </td>
                     </tr>
                 </table>
-                
+
+                <?php
+                // v4.41.5.8+: per-site debugging toggle. When enabled, the
+                // chat widget appends a small timing subtitle below each
+                // bot answer showing client round-trip ms with server
+                // total_ms in parentheses. Off by default. Per-site so a
+                // staging tenant can enable it without affecting
+                // production tenants on the same network.
+                ?>
+                <h3><?php echo \CleverSay\Icons::render('activity', 18); ?><?php esc_html_e('Debugging', 'cleversay'); ?></h3>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">
+                            <?php esc_html_e('Show Response Timing', 'cleversay'); ?>
+                        </th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="show_timing" value="1"
+                                       <?php checked(!empty(get_option('cleversay_show_timing', false))); ?>>
+                                <?php esc_html_e('Display response time below each bot answer in the chat widget', 'cleversay'); ?>
+                            </label>
+                            <p class="description">
+                                <?php esc_html_e(
+                                    'Useful for performance testing. Shows the client round-trip time (what the user actually waits for) with the server-side total in parentheses. Off by default — leave off in production. Toggle this on staging to compare model latencies live.',
+                                    'cleversay'
+                                ); ?>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
                 <h3><?php echo \CleverSay\Icons::render('info', 18); ?><?php esc_html_e('System Information', 'cleversay'); ?></h3>
                 <table class="widefat striped">
                     <tr>
@@ -1654,6 +1684,19 @@ $snippet    = "<script>\n(function(w,d,s){\n  var j=d.createElement(s);j.async=t
                                 </label>
                                 <p class="description">
                                     <?php esc_html_e('Adds engagement by suggesting adjacent topics — e.g. asking about tuition prompts a follow-up about payment plans. Off-topic refusals never get a follow-up. Disable for compliance-heavy sites where strict, terse answers are preferred.', 'cleversay'); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><?php esc_html_e('Query Rewriter', 'cleversay'); ?></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" name="ai_query_rewriter" value="1"
+                                           <?php checked(get_option('cleversay_ai_query_rewriter', true)); ?>>
+                                    <?php esc_html_e('Use AI to resolve referential follow-up questions ("what about it?", "tell me more") into self-contained queries by reading conversation history', 'cleversay'); ?>
+                                </label>
+                                <p class="description">
+                                    <?php esc_html_e('Helpful for chatty conversational use. Off for sites where users tend to ask self-contained questions — disabling avoids occasional false positives where the rewriter reframes a complete question into a narrower follow-up. Default on. v4.41.5.9 tightened the firing heuristics to reduce false positives, but the toggle remains for full operator control.', 'cleversay'); ?>
                                 </p>
                             </td>
                         </tr>

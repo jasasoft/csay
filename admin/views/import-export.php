@@ -410,7 +410,15 @@ $backups = $import_export->get_backups();
         <!-- Backups Section -->
         <div class="section-card">
             <h2><?php esc_html_e('Automatic Backups', 'cleversay'); ?></h2>
-            <p class="description"><?php esc_html_e('Backups are created automatically before each import.', 'cleversay'); ?></p>
+            <p class="description">
+                <?php
+                printf(
+                    /* translators: %d: retention count */
+                    esc_html__('Backups are created automatically (1) before each import and (2) daily via cron. The %d newest backups are kept; older ones are pruned automatically.', 'cleversay'),
+                    (int) \CleverSay\ImportExport::BACKUP_KEEP
+                );
+                ?>
+            </p>
             
             <?php if (!empty($backups)): ?>
                 <table class="wp-list-table widefat striped">
